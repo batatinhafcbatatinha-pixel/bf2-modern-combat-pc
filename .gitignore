@@ -1,0 +1,25 @@
+# Private, never published: your game files, the SDK download, generated code and builds.
+.local/
+build/
+dist/
+out/
+game_files/
+**/game_files/
+**/generated/
+**/third_party/ffmpeg/
+**/__pycache__/
+*.pyc
+*.iso
+*.xex
+*.xbe
+*.dll
+*.exe
+*.so*
+*.obj
+*.lib
+*.pdb
+*.a
+*.bmp
+*.png
+*.wav
+*.log

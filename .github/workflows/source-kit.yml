@@ -1,0 +1,49 @@
+name: Audit and package source kit
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Audit source publication and create ZIP
+        run: python tools/audit_publication.py --zip dist/bf2-modern-combat-pc-source-kit.zip
+      - name: Test ISO extraction and file validation without a game
+        run: python tools/test_tools.py -v
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: audit
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python tools/audit_publication.py --zip dist/bf2-modern-combat-pc-source-kit.zip
+      - name: Publish source-only Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/bf2-modern-combat-pc-source-kit.zip \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "Battlefield 2: Modern Combat PC — $GITHUB_REF_NAME source kit" \
+            --notes-file RELEASE-NOTES.md

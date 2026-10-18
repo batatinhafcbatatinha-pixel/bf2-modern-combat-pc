@@ -1,0 +1,62 @@
+{
+  "repo": "bf2-modern-combat-pc",
+  "game": "Battlefield 2: Modern Combat",
+  "revision": "Xbox 360, USA",
+  "required_files": {
+    "default.xex": "a2e791b578ef15420f3737b48999ca4285fdf85c85cb6732aac0e465ed9d5484"
+  },
+  "required_paths": [
+    "Audio",
+    "Data1.viv"
+  ],
+  "project_dir": "project",
+  "manifest": "bf2mc_manifest.toml",
+  "target": "bf2mc",
+  "extra_targets": [],
+  "copy": [
+    "project"
+  ],
+  "ffmpeg_dest": "project/third_party/ffmpeg/include",
+  "play_args": [
+    "--mnk_mode=true",
+    "--mnk_mouse=true",
+    "--keybind_right_trigger=LMB",
+    "--keybind_left_trigger=RMB",
+    "--keybind_a=Space",
+    "--keybind_b=C,Backspace",
+    "--keybind_x=R",
+    "--keybind_y=E",
+    "--keybind_left_shoulder=Q",
+    "--keybind_right_shoulder=F",
+    "--keybind_lstick_press=Z",
+    "--keybind_rstick_press=V",
+    "--keybind_rstick_up=",
+    "--keybind_rstick_down=",
+    "--keybind_rstick_left=",
+    "--keybind_rstick_right=",
+    "--keybind_dpad_up=Up",
+    "--keybind_dpad_down=Down",
+    "--keybind_dpad_left=Left",
+    "--keybind_dpad_right=Right",
+    "--keybind_start=Return,Escape",
+    "--keybind_back=Tab"
+  ],
+  "sdk": {
+    "version": "0.10.0.24-dev.gbd833a2 (nightly 2026-10-02)",
+    "url": "https://github.com/rexglue/rexglue-sdk/releases/download/nightly-20261002-bd833a2a/rexglue-sdk-0.10.0.24-dev.gbd833a2-win-amd64.zip",
+    "sha256": "1e19d7ec9be0d9d7e1a0088a34a33b068d4dea520181e81318528ef3b37627e7",
+    "folder": "win-amd64",
+    "patches": [
+      {
+        "name": "rexglue-fpscr-mask",
+        "file": "include/rex/ppc/context.h",
+        "old": "  inline void setcsr(uint32_t csr) noexcept { Platform::setcsr(csr); }\n",
+        "new": "  // Port patch: never let a stale/zero cached csr unmask host FP exceptions\n  // (guest threads whose csr was never seeded hit STATUS_FLOAT_INEXACT_RESULT).\n  inline void setcsr(uint32_t value) noexcept {\n    Platform::InitHostExceptions(value);\n    csr = value;\n    Platform::setcsr(value);\n  }\n"
+      }
+    ]
+  },
+  "ffmpeg": {
+    "commit": "0604b464c7cb4ebc94940cf1f324a3b26b87717c",
+    "url": "https://codeload.github.com/wmarti/FFmpeg/tar.gz/0604b464c7cb4ebc94940cf1f324a3b26b87717c"
+  }
+}

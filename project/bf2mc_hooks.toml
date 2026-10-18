@@ -1,0 +1,11 @@
+# Mid-asm hooks (C++ side: project/src/hooks.cpp)
+
+# XPhysicalAlloc wrapper (sub_82195008) -> MmAllocatePhysicalMemoryEx: game asks 4 MB with
+# protect=0x20000400 (WRITECOMBINE only); runtime rejects -> null object later. Add READWRITE.
+[[midasm_hook]]
+address = 0x82195060
+name = "bf2_fix_physalloc_protect"
+registers = ["r5"]
+
+# Native GPU: draw/clear/resolve/swap are replaced by REX_HOOK_RAW overrides in
+# src/native_gpu/gpu_hooks.cpp (no mid-asm hooks needed).

@@ -1,0 +1,17 @@
+--- a/include/rex/ppc/context.h	2026-10-14 11:57:22.884711800 -0300
++++ b/include/rex/ppc/context.h	2026-10-14 11:57:22.951705200 -0300
+@@ -158,7 +158,13 @@
+   static constexpr uint32_t GuestMask = uint32_t(RoundMaskVal) | uint32_t(FlushMask);
+ 
+   inline uint32_t getcsr() noexcept { return Platform::getcsr(); }
+-  inline void setcsr(uint32_t csr) noexcept { Platform::setcsr(csr); }
++  // bf2mc patch: never let a stale/zero cached csr unmask host FP exceptions
++  // (guest threads whose csr was never seeded hit STATUS_FLOAT_INEXACT_RESULT).
++  inline void setcsr(uint32_t value) noexcept {
++    Platform::InitHostExceptions(value);
++    csr = value;
++    Platform::setcsr(value);
++  }
+ 
+   // Restoring the whole word would unmask every FP exception when csr is 0.
+   inline void restoreGuestBits(uint32_t saved) noexcept {
