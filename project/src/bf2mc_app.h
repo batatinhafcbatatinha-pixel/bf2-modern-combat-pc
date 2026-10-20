@@ -13,6 +13,7 @@
 
 #include "native_audio/audio_system.h"
 #include "native_gpu/native_gpu.h"
+#include "pc_game_info.h"
 
 class Bf2mcApp : public rex::ReXApp {
  public:
@@ -26,6 +27,8 @@ class Bf2mcApp : public rex::ReXApp {
 
  protected:
   void OnPreSetup(rex::RuntimeConfig& config) override {
+    // In-game PC settings (F1): window size/mode from bf2mc-pc.ini.
+    pcs::Configure(PcGameInfo());
     config.graphics = nullptr;
     config.gpu_plugin.clear();
     config.audio_factory = [](rex::runtime::FunctionDispatcher* dispatcher)

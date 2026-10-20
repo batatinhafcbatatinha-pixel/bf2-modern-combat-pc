@@ -1183,7 +1183,8 @@ XPSOut main(XVSOut xi, bool xface : SV_IsFrontFace) {
     h << "  [unroll] for (int ii = 0; ii < " << std::min<uint32_t>(nregs, 16) << "; ++ii) r[ii] = xi.o[ii];\n";
     if (opt_.ps_param_gen_reg < 16 && opt_.ps_param_gen_reg < nregs) {
       // X: pixel x (sign = back face), Y: pixel y (sign = point), Z: sign = line, W: 0.
-      h << "  {\n    float4 pg = float4(floor(xi.pos.xy), 0.0, 0.0);\n";
+      // In guest pixels: render targets may be drawn at a higher internal resolution (xsys[6].x).
+      h << "  {\n    float4 pg = float4(floor(xi.pos.xy * xsys[6].x), 0.0, 0.0);\n";
       h << "    uint fl = asuint(xsys[3].z);\n";
       h << "    if ((fl & 1u) && !xface) pg.x = -pg.x;\n";
       h << "    if (fl & 2u) { pg.y = -pg.y; pg.zw = xi.pts.zw; }\n";

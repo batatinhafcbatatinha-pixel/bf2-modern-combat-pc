@@ -10,6 +10,7 @@
 #include <SDL3/SDL.h>
 
 #include <rex/logging.h>
+#include "pc_settings.h"
 #include <rex/system/function_dispatcher.h>
 #include <rex/system/kernel_state.h>
 #include <rex/system/xmemory.h>
@@ -164,6 +165,8 @@ void NativeAudioSystem::SubmitFrame(uint32_t index, uint32_t samples) {
       out[i * 2 + 1] = std::clamp((ch(1, i) + mid + ch(5, i) * kSide) * kScale, -1.0f, 1.0f);
     }
   }
+  // PC settings volume (0 while the settings menu holds the game).
+  SDL_SetAudioStreamGain(stream, pcs::Volume());
   SDL_PutAudioStreamData(stream, out, int(kFrameSamples * device_channels_ * sizeof(float)));
   submitted_++;
   float peak = 0.0f;

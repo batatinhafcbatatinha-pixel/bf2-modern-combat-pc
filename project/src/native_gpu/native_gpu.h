@@ -9,6 +9,7 @@
 #pragma once
 
 #include <cstdint>
+#include <vector>
 
 namespace bf2n {
 
@@ -24,8 +25,23 @@ constexpr uint32_t kDepthSurface = 0x3108;    // 12552
 constexpr uint32_t kIndexBuffer = 0x30F4;     // 12532
 constexpr uint32_t kPixelShader = 0x3290;
 constexpr uint32_t kVertexShader = 0x3294;
+constexpr uint32_t kVertexDeclaration = 0x2C90;  // 11408
 constexpr uint32_t kGpuCallbackBlock = 0x2894;  // 10388: pointer to {mask, ?, ?, ?, callback, data}
 }  // namespace dev
+
+// The draw flush (sub_8248AF68) patches the vertex shader's vfetch instructions in memory for the
+// current vertex declaration only when the GPU is past the shader's last use; otherwise
+// sub_8248AB00 copies the microcode into the command buffer, patches the copy and leaves memory
+// patched for the previous declaration. The copy is the loaded shader while that declaration is
+// current (gpu_hooks.cpp keeps it; Renderer::ReadUcode uses it).
+struct ImmediateVertexShader {
+  uint32_t device = 0, shader = 0, declaration = 0, declaration_id = 0;
+  std::vector<uint8_t> code;
+};
+inline ImmediateVertexShader& LoadedImmediateVertexShader() {
+  static ImmediateVertexShader s;
+  return s;
+}
 
 struct UpDraw {
   bool pending = false;
@@ -51,6 +67,8 @@ void RendererResolve(uint32_t device, uint32_t flags, uint32_t src_rect, uint32_
                      uint32_t dest_point, uint32_t level, uint32_t slice, uint32_t clear_color,
                      float clear_z, uint32_t clear_stencil);
 void RendererSwap(uint32_t device, uint32_t front_texture);
+// F12: trace and dump the next frame into captures/<time>/ next to the executable (any thread).
+void RendererRequestCapture();
 
 // gpu_hooks.cpp
 void NativeGpuInstallMmio();

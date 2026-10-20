@@ -28,6 +28,7 @@
 #include <wrl/client.h>
 
 #include "native_gpu.h"
+#include "pc_game_info.h"
 #include "textures.h"
 #include "xenos_hlsl.h"
 
@@ -37,6 +38,8 @@
 #include <xxhash.h>
 
 #include <algorithm>
+#include <atomic>
+#include <bit>
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
@@ -230,6 +233,7 @@ struct HostRT {
   uint32_t guest_format = 0;
   DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
   bool depth = false;
+  float scale = 1.0f;  // host texels per guest texel (internal resolution)
 };
 
 struct Resolved {
@@ -240,6 +244,7 @@ struct Resolved {
   uint32_t width = 0, height = 0, slices = 1;
   uint32_t guest_format = 0;
   bool cube = false;
+  float scale = 1.0f;  // that of the targets resolved into it (copies are texel for texel)
   uint32_t used_width = 0, used_height = 0;  // extent of the last copy into it
   bool bgra = false;  // holds an 8_8_8_8 resolve, stored as BGRA (see Resolve)
   uint64_t signature = 0;  // guest memory signature at resolve time
@@ -284,9 +289,14 @@ struct Targets {
   bool gamma[4] = {};
   HostRT* depth = nullptr;
   uint32_t width = 0, height = 0;
+  float scale = 1.0f;  // internal resolution of these targets
 };
 
 enum class Kind { kPoints, kLines, kTris, kRects };
+
+// Trace lines (BF2_TRACE_FRAME / BF2_DEBUG_AT / F12 capture) go to the log and, during an F12
+// capture, to the capture's trace.txt.
+#define BF2_TRACE(...) TraceLine(fmt::format(__VA_ARGS__))
 
 class Renderer {
  public:
@@ -317,7 +327,7 @@ class Renderer {
   ID3D11ShaderResourceView* GetTexture(const TexFetch& f, TexDim want);
   ID3D11ShaderResourceView* GetResolvedSrv(const TexFetch& f, TexDim want);
   ID3D11SamplerState* GetSampler(const TexFetch& f, const TextureBinding& b);
-  Resolved* GetResolved(const TexFetch& f);
+  Resolved* GetResolved(const TexFetch& f, float scale);
   uint64_t GuestSignature(const TexFetch& f);
 
   ID3D11BlendState* GetBlend(const D3D11_BLEND_DESC& d);
@@ -375,6 +385,19 @@ class Renderer {
 
   std::filesystem::path cache_dir_;
   uint32_t frame_ = 1;
+  // Internal resolution (PC settings, fixed at boot): render targets at least 640 wide (the scene,
+  // half-resolution effects, shadow maps) and what is resolved from them are scale_ times their
+  // guest size; smaller ones (reduction chains, probes) keep it. Everything else stays in guest
+  // pixels.
+  float scale_ = 1.0f;
+  float ScaleFor(uint32_t width) const { return width >= 640 ? scale_ : 1.0f; }
+  static uint32_t ScaledSize(uint32_t v, float s) {
+    return std::max<uint32_t>(1, uint32_t(std::ceil(float(v) * s - 0.001f)));
+  }
+  static LONG ScaledCoord(LONG v, float s) { return LONG(std::lround(float(v) * s)); }
+  static D3D11_RECT ScaledRect(const D3D11_RECT& r, float s) {
+    return {ScaledCoord(r.left, s), ScaledCoord(r.top, s), ScaledCoord(r.right, s), ScaledCoord(r.bottom, s)};
+  }
   uint32_t draw_serial_ = 1;
   uint32_t frame_draws_ = 0, frame_skipped_ = 0;
   uint32_t last_front_base_ = 0;
@@ -417,6 +440,22 @@ class Renderer {
   void DumpSrv(ID3D11ShaderResourceView* srv, uint32_t w, uint32_t h, const std::string& name);
   void WriteBmp(const std::string& name, const uint8_t* rgba, uint32_t pitch, uint32_t w,
                 uint32_t h);
+
+  // F12 capture (RequestCapture): the next frame is traced into captures/<time>/trace.txt with
+  // every render target, resolve and sampled texture (each mip level) and the final picture.
+ public:
+  std::atomic<bool> capture_request{false};
+
+ private:
+  std::filesystem::path out_dir_;          // where dumps go: next to the exe, or the capture
+  uint32_t capture_frame_ = UINT32_MAX;
+  std::ofstream trace_out_;
+  void TraceLine(const std::string& line) {
+    REXLOG_INFO("{}", line);
+    if (trace_out_.is_open()) trace_out_ << line << '\n';
+  }
+  void BeginCapture();
+  void DumpFrameTextures();
 };
 
 Renderer* g_renderer = nullptr;
@@ -434,12 +473,18 @@ bool Renderer::Init(HWND hwnd) {
   if (GetEnvironmentVariableA("BF2_D3D_DEBUG", nullptr, 0)) flags |= D3D11_CREATE_DEVICE_DEBUG;
   const D3D_FEATURE_LEVEL levels[] = {D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0};
   D3D_FEATURE_LEVEL got;
-  HRESULT hr = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, flags, levels, 2,
-                                 D3D11_SDK_VERSION, &dev_, &got, &imm_);
+  // PC settings: graphics card chosen in the settings menu (null = Windows default).
+  IDXGIAdapter1* chosen = pcs::Adapter();
+  D3D_DRIVER_TYPE type = chosen ? D3D_DRIVER_TYPE_UNKNOWN : D3D_DRIVER_TYPE_HARDWARE;
+  HRESULT hr = D3D11CreateDevice(chosen, type, nullptr, flags, levels, 2, D3D11_SDK_VERSION, &dev_,
+                                 &got, &imm_);
   if (hr == E_INVALIDARG) {
-    hr = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, flags, levels + 1, 1,
-                           D3D11_SDK_VERSION, &dev_, &got, &imm_);
+    hr = D3D11CreateDevice(chosen, type, nullptr, flags, levels + 1, 1, D3D11_SDK_VERSION, &dev_, &got,
+                           &imm_);
   }
+  if (chosen) chosen->Release();
+  scale_ = pcs::ResolutionScale();
+  if (scale_ != 1.0f) REXLOG_INFO("bf2native: internal resolution x{:.3f}", scale_);
   if (FAILED(hr)) {
     REXLOG_ERROR("bf2native: D3D11CreateDevice failed {:08X}", uint32_t(hr));
     return false;
@@ -472,6 +517,7 @@ bool Renderer::Init(HWND hwnd) {
   sd.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
   sd.BufferCount = 2;
   sd.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
+  sd.Flags = pcs::SwapChainFlags();
   sd.Scaling = DXGI_SCALING_STRETCH;
   hr = factory->CreateSwapChainForHwnd(dev_.Get(), hwnd, &sd, nullptr, nullptr, &swap_);
   if (FAILED(hr)) {
@@ -523,6 +569,7 @@ bool Renderer::Init(HWND hwnd) {
   wchar_t exe[MAX_PATH] = {};
   GetModuleFileNameW(nullptr, exe, MAX_PATH);
   cache_dir_ = std::filesystem::path(exe).parent_path() / "native_shader_cache";
+  out_dir_ = std::filesystem::path(exe).parent_path();
   std::error_code ec;
   std::filesystem::create_directories(cache_dir_, ec);
 
@@ -704,6 +751,14 @@ bool Renderer::ReadUcode(uint32_t object, bool pixel, std::vector<uint32_t>& out
   uint32_t bytes = LoadV(object + (pixel ? 0x3C : 0x258));
   if (!ptr || !bytes || bytes > 0x10000 || (bytes & 3)) return false;
   const uint8_t* src = ptr < kPhysicalSize ? Mem()->TranslatePhysical(ptr) : Virt(ptr);
+  if (!pixel) {
+    // The flush may have loaded a patched copy instead (see ImmediateVertexShader).
+    const auto& imm = LoadedImmediateVertexShader();
+    if (imm.shader == object && imm.code.size() == bytes) {
+      uint32_t decl = LoadV(imm.device + dev::kVertexDeclaration);
+      if (decl == imm.declaration && LoadV(decl + 32) == imm.declaration_id) src = imm.code.data();
+    }
+  }
   out.resize(bytes / 4);
   for (uint32_t i = 0; i < bytes / 4; ++i) out[i] = Be32(src + i * 4);
   return true;
@@ -802,8 +857,9 @@ HostRT* Renderer::GetRT(uint32_t base, uint32_t format, uint32_t w, uint32_t h, 
   rt.guest_format = format;
   rt.depth = depth;
   D3D11_TEXTURE2D_DESC d{};
-  d.Width = w;
-  d.Height = h;
+  rt.scale = ScaleFor(w);
+  d.Width = ScaledSize(w, rt.scale);
+  d.Height = ScaledSize(h, rt.scale);
   d.MipLevels = 1;
   d.ArraySize = 1;
   d.SampleDesc.Count = 1;
@@ -870,6 +926,7 @@ bool Renderer::CurrentTargets(uint32_t device, Targets& t, bool want_color) {
   if (!have) return false;
   t.width = std::clamp(w, 1u, 8192u);
   t.height = std::clamp(h, 1u, 8192u);
+  t.scale = ScaleFor(t.width);
   uint32_t edram_mode = Reg(device, 0x2208) & 7;
   static const uint32_t kInfo[4] = {0x2001, 0x2003, 0x2004, 0x2005};
   if (want_color && edram_mode != 5) {
@@ -998,7 +1055,7 @@ void Renderer::LateSyncMirror() {
     D3D11_BOX box{0, 0, 0, pool_used_, 1, 1};
     imm_->UpdateSubresource(pool_.Get(), 0, &box, pool_cpu_.data(), 0, 0);
   }
-  if (late && frame_ == trace_frame_) REXLOG_INFO("bf2trace: {} mirror chunks written after their draws", late);
+  if (late && frame_ == trace_frame_) BF2_TRACE("bf2trace: {} mirror chunks written after their draws", late);
   pool_used_ = 0;
   frame_chunks_.clear();
 }
@@ -1057,7 +1114,7 @@ uint64_t Renderer::GuestSignature(const TexFetch& f) {
   return XXH3_64bits(phys + base, n);
 }
 
-Resolved* Renderer::GetResolved(const TexFetch& f) {
+Resolved* Renderer::GetResolved(const TexFetch& f, float scale) {
   uint32_t base = f.base_address() & 0x1FFFFFFFu;
   uint32_t w = f.width(), h = f.height();
   uint32_t dim = f.dimension();
@@ -1067,7 +1124,7 @@ Resolved* Renderer::GetResolved(const TexFetch& f) {
   if (it != resolved_.end()) {
     Resolved& r = it->second;
     if (r.width == w && r.height == h && r.slices == slices && r.cube == cube &&
-        r.guest_format == f.format()) {
+        r.guest_format == f.format() && r.scale == scale) {
       return &r;
     }
     resolved_.erase(it);
@@ -1078,9 +1135,10 @@ Resolved* Renderer::GetResolved(const TexFetch& f) {
   r.slices = slices;
   r.cube = cube;
   r.guest_format = f.format();
+  r.scale = scale;
   D3D11_TEXTURE2D_DESC d{};
-  d.Width = w;
-  d.Height = h;
+  d.Width = ScaledSize(w, scale);
+  d.Height = ScaledSize(h, scale);
   d.MipLevels = 1;
   d.ArraySize = slices;
   d.Format = ResolveFormat(f.format());
@@ -1283,6 +1341,9 @@ ID3D11SamplerState* Renderer::GetSampler(const TexFetch& f, const TextureBinding
   uint32_t min = b.min != 0xFF ? b.min : f.min_filter();
   uint32_t mip = b.mip != 0xFF ? b.mip : f.mip_filter();
   uint32_t aniso = b.aniso != 0xFF ? b.aniso : f.aniso_filter();
+  // PC settings: anisotropic filtering forced on filtered (linear mip) fetches.
+  if (int forced = pcs::Anisotropy(); forced > 1 && min == 1 && mag == 1 && mip == 1)
+    aniso = std::max<uint32_t>(aniso >= 2 && aniso <= 5 ? aniso : 0, uint32_t(std::countr_zero(unsigned(forced))) + 1);
   D3D11_SAMPLER_DESC d;
   ZeroMemory(&d, sizeof(d));
   if (aniso >= 2 && aniso <= 5) {
@@ -1556,6 +1617,7 @@ void Renderer::Draw(uint32_t device, uint32_t prim, std::vector<uint32_t>& vids,
   sys[21] = vy;
   sys[22] = float(point_size >> 16) * 2.0f / 16.0f;
   sys[23] = float(point_size & 0xFFFF) * 2.0f / 16.0f;
+  sys[24] = 1.0f / t.scale;  // host pixels -> guest pixels (pixel position parameter)
   UpdateBuffer(state_cb_.Get(), &st, sizeof(st));
 
   static uint32_t consts[1024];
@@ -1566,7 +1628,7 @@ void Renderer::Draw(uint32_t device, uint32_t prim, std::vector<uint32_t>& vids,
     UpdateBuffer(ps_consts_.Get(), consts, 4096);
     if (frame_ == trace_frame_ && prim == 13) {
       for (int r : {0, 1, 2, 3, 20, 21, 22, 252, 253, 254, 255}) {
-        REXLOG_INFO("bf2trace:   psc[{}] {} {} {} {}", r, AsFloat(consts[r * 4]), AsFloat(consts[r * 4 + 1]),
+        BF2_TRACE("bf2trace:   psc[{}] {} {} {} {}", r, AsFloat(consts[r * 4]), AsFloat(consts[r * 4 + 1]),
                     AsFloat(consts[r * 4 + 2]), AsFloat(consts[r * 4 + 3]));
       }
     }
@@ -1607,7 +1669,7 @@ void Renderer::Draw(uint32_t device, uint32_t prim, std::vector<uint32_t>& vids,
       }
       srv_count = std::max(srv_count, 2 + i);
       if (frame_ == trace_frame_) {
-        REXLOG_INFO("bf2trace:   {} t{} slot {} dim {} -> fetch type {} base {:08X} fmt {} {}x{} fdim {} sign {:X} swz {:03X} {}",
+        BF2_TRACE("bf2trace:   {} t{} slot {} dim {} -> fetch type {} base {:08X} fmt {} {}x{} fdim {} sign {:X} swz {:03X} {}",
                     pixel ? "ps" : "vs", i, b.slot, int(b.dim), f.type(), f.base_address(), f.format(),
                     f.width(), f.height(), f.dimension(), (f.d[0] >> 2) & 0xFF, f.swizzle(),
                     (srv == black_2d_.Get() || srv == black_3d_.Get() || srv == black_cube_.Get()) &&
@@ -1621,7 +1683,7 @@ void Renderer::Draw(uint32_t device, uint32_t prim, std::vector<uint32_t>& vids,
         D3D11_SAMPLER_DESC sd;
         samplers[i]->GetDesc(&sd);
         auto rit = resolved_.find(f.base_address() & 0x1FFFFFFFu);
-        REXLOG_INFO("bf2trace:     src {} filter {:X} addr {} {} lod {} {} bias {} d3 {:08X} d4 {:08X} d5 {:08X}",
+        BF2_TRACE("bf2trace:     src {} filter {:X} addr {} {} lod {} {} bias {} d3 {:08X} d4 {:08X} d5 {:08X}",
                     rit != resolved_.end() && rit->second.srv.Get() == srv ? "resolve" : "guest",
                     int(sd.Filter), int(sd.AddressU), int(sd.AddressV), sd.MinLOD, sd.MaxLOD,
                     sd.MipLODBias, f.d[3], f.d[4], f.d[5]);
@@ -1637,7 +1699,7 @@ void Renderer::Draw(uint32_t device, uint32_t prim, std::vector<uint32_t>& vids,
     }
   };
   if (frame_ == trace_frame_) {
-    REXLOG_INFO("bf2trace: draw {} prim {} n {} vs {:08X} ps {:08X} keys {:016X} {:016X} rt {}x{} c0 {} fmt {} d {} vte {:X} vp {} {} {} {} mode {:X} dc {:X} blend0 {:08X} cmask {:X} cc {:X} pswr {:X} edram {}",
+    BF2_TRACE("bf2trace: draw {} prim {} n {} vs {:08X} ps {:08X} keys {:016X} {:016X} rt {}x{} c0 {} fmt {} d {} vte {:X} vp {} {} {} {} mode {:X} dc {:X} blend0 {:08X} cmask {:X} cc {:X} pswr {:X} edram {}",
                 frame_draws_, prim, indices.size(), LoadV(device + dev::kVertexShader), ps_object, vs->key,
                 ps ? ps->key : 0,
                 t.width, t.height, t.color[0] ? 1 : 0, t.color[0] ? t.color[0]->guest_format : 99,
@@ -1646,12 +1708,12 @@ void Renderer::Draw(uint32_t device, uint32_t prim, std::vector<uint32_t>& vids,
                 ps ? ps->info.color_written : 0, Reg(device, 0x2208));
     if (up) {
       const uint8_t* v = Virt(up->vertices);
-      REXLOG_INFO("bf2trace:   UP vtx {:08X} n {} stride {} idx {} | {} {} {} {} {} {} {} {}", up->vertices,
+      BF2_TRACE("bf2trace:   UP vtx {:08X} n {} stride {} idx {} | {} {} {} {} {} {} {} {}", up->vertices,
                   up->vertex_count, up->stride, up->indexed, AsFloat(Be32(v)), AsFloat(Be32(v + 4)),
                   AsFloat(Be32(v + 8)), AsFloat(Be32(v + 12)), AsFloat(Be32(v + 16)), AsFloat(Be32(v + 20)),
                   AsFloat(Be32(v + 24)), AsFloat(Be32(v + 28)));
     }
-    REXLOG_INFO("bf2trace:   cinfo {:08X} dinfo {:08X} surf {:08X} scale {} {} {} off {} {} {} zs {:X} xs {:X}",
+    BF2_TRACE("bf2trace:   cinfo {:08X} dinfo {:08X} surf {:08X} scale {} {} {} off {} {} {} zs {:X} xs {:X}",
                 Reg(device, 0x2001), Reg(device, 0x2002), Reg(device, 0x2000), sx, sy, sz, ox, oy, oz,
                 Reg(device, 0x2204), Reg(device, 0x2302));
   }
@@ -1765,7 +1827,7 @@ void Renderer::Draw(uint32_t device, uint32_t prim, std::vector<uint32_t>& vids,
   rd.ScissorEnable = TRUE;
   ctx_->RSSetState(GetRasterizer(rd));
 
-  D3D11_VIEWPORT vp{vx, vy, vw, vh, 0.0f, 1.0f};
+  D3D11_VIEWPORT vp{vx * t.scale, vy * t.scale, vw * t.scale, vh * t.scale, 0.0f, 1.0f};
   ctx_->RSSetViewports(1, &vp);
   // Scissor: screen scissor, the device's scissor rect when enabled, and the target.
   uint32_t tl = Reg(device, 0x200E), br = Reg(device, 0x200F);
@@ -1787,6 +1849,7 @@ void Renderer::Draw(uint32_t device, uint32_t prim, std::vector<uint32_t>& vids,
   }
   D3D11_RECT sc{x0, y0, std::min<LONG>(x1, LONG(t.width)), std::min<LONG>(y1, LONG(t.height))};
   if (sc.right <= sc.left || sc.bottom <= sc.top) return;
+  sc = ScaledRect(sc, t.scale);
   ctx_->RSSetScissorRects(1, &sc);
 
   // --- Pipeline and draw.
@@ -1877,7 +1940,7 @@ void Renderer::SaveSteps() {
     else
       diff = cur.size();
     if (diff) {
-      REXLOG_INFO("bf2trace: step draw {} rt {} fmt {} changed {} bytes", st.draw, (const void*)st.rt,
+      BF2_TRACE("bf2trace: step draw {} rt {} fmt {} changed {} bytes", st.draw, (const void*)st.rt,
                   int(st.format), diff);
       if (dumped < 300) {
         ComPtr<ID3D11ShaderResourceView> srv;
@@ -1899,8 +1962,9 @@ void Renderer::SaveSteps() {
 
 // --- Clear -------------------------------------------------------------------------------------
 
-void Renderer::ClearTargetsWithDraw(const Targets& t, const D3D11_RECT& rect, uint32_t flags,
+void Renderer::ClearTargetsWithDraw(const Targets& t, const D3D11_RECT& guest_rect, uint32_t flags,
                                     const float color[4], float z, uint32_t stencil) {
+  const D3D11_RECT rect = ScaledRect(guest_rect, t.scale);
   ID3D11RenderTargetView* rtvs[4] = {};
   for (uint32_t i = 0; i < 4; ++i) {
     if (t.color[i] && (flags & (1u << i))) rtvs[i] = t.color[i]->rtv.Get();
@@ -1958,7 +2022,7 @@ void Renderer::Clear(uint32_t device, uint32_t count, uint32_t rects, uint32_t f
   Targets t;
   if (!CurrentTargets(device, t)) return;
   if (frame_ == trace_frame_) {
-    REXLOG_INFO("bf2trace: clear flags {:X} count {} color {:08X} z {} rt {}x{}", flags, count, color, z,
+    BF2_TRACE("bf2trace: clear flags {:X} count {} color {:08X} z {} rt {}x{}", flags, count, color, z,
                 t.width, t.height);
   }
   const float c[4] = {float((color >> 16) & 0xFF) / 255.0f, float((color >> 8) & 0xFF) / 255.0f,
@@ -1997,7 +2061,7 @@ void Renderer::Resolve(uint32_t device, uint32_t flags, uint32_t src_rect, uint3
   uint32_t source = flags & 7;
   HostRT* src = source == 4 ? t.depth : (source < 4 ? t.color[source] : nullptr);
   if (frame_ == trace_frame_) {
-    REXLOG_INFO("bf2trace: resolve flags {:X} src {} rt {}x{} dest {:08X} -> {:08X} level {} slice {}",
+    BF2_TRACE("bf2trace: resolve flags {:X} src {} rt {}x{} dest {:08X} -> {:08X} level {} slice {}",
                 flags, src ? 1 : 0, t.width, t.height, dest_texture,
                 dest_texture ? ReadFetch(dest_texture + 16).base_address() : 0, level, slice);
   }
@@ -2005,7 +2069,7 @@ void Renderer::Resolve(uint32_t device, uint32_t flags, uint32_t src_rect, uint3
   if (dest_texture && level == 0) {
     TexFetch f = ReadFetch(dest_texture + 16);
     if (f.base_address()) {
-      if (Resolved* r = GetResolved(f)) {
+      if (Resolved* r = GetResolved(f, t.scale)) {
         LONG sx0 = 0, sy0 = 0, sx1 = LONG(t.width), sy1 = LONG(t.height);
         if (src_rect) {
           sx0 = LONG(int32_t(LoadV(src_rect)));
@@ -2047,16 +2111,17 @@ void Renderer::Resolve(uint32_t device, uint32_t flags, uint32_t src_rect, uint3
           rd.DepthClipEnable = TRUE;
           rd.ScissorEnable = TRUE;
           ctx_->RSSetState(GetRasterizer(rd));
-          D3D11_VIEWPORT vp{float(dx), float(dy), float(w), float(h), 0.0f, 1.0f};
-          D3D11_RECT sc{dx, dy, dx + w, dy + h};
+          D3D11_RECT sc = ScaledRect({dx, dy, dx + w, dy + h}, t.scale);
+          D3D11_VIEWPORT vp{float(sc.left), float(sc.top), float(sc.right - sc.left), float(sc.bottom - sc.top),
+                            0.0f, 1.0f};
           ctx_->RSSetViewports(1, &vp);
           ctx_->RSSetScissorRects(1, &sc);
           // The resolve stores 8_8_8_8 in memory as BGRA: games sample it with a swizzle that
           // swaps red and blue back (fetch swizzle 60A), so host textures keep the same order.
           bool swap = source < 4 && src->guest_format <= 1 && (f.format() == 6 || f.format() == 62);
           UtilConsts u{};
-          u.u2[0] = float(sx0 - dx);
-          u.u2[1] = float(sy0 - dy);
+          u.u2[0] = float(ScaledCoord(sx0, t.scale) - ScaledCoord(dx, t.scale));
+          u.u2[1] = float(ScaledCoord(sy0, t.scale) - ScaledCoord(dy, t.scale));
           u.u2[2] = swap ? 1.0f : 0.0f;
           SetUtil(u);
           r->bgra = swap;
@@ -2146,7 +2211,7 @@ void Renderer::WriteBmp(const std::string& name, const uint8_t* rgba, uint32_t p
   fh.bfType = 0x4D42;
   fh.bfOffBits = sizeof(fh) + sizeof(ih);
   fh.bfSize = DWORD(fh.bfOffBits + px.size());
-  std::ofstream out(cache_dir_.parent_path() / name, std::ios::binary);
+  std::ofstream out(out_dir_ / name, std::ios::binary);
   out.write(reinterpret_cast<const char*>(&fh), sizeof(fh));
   out.write(reinterpret_cast<const char*>(&ih), sizeof(ih));
   out.write(reinterpret_cast<const char*>(px.data()), std::streamsize(px.size()));
@@ -2211,7 +2276,7 @@ void Renderer::LogCenterTexel(ID3D11Texture2D* tex, const char* name) {
       for (int i = 0; i < 4; ++i) f[i] = p[i] / 255.0f;
       break;
   }
-  REXLOG_INFO("bf2dump: {} center {} {} {} {}", name, f[0], f[1], f[2], f[3]);
+  BF2_TRACE("bf2dump: {} center {} {} {} {}", name, f[0], f[1], f[2], f[3]);
   imm_->Unmap(st.Get(), 0);
 }
 
@@ -2264,8 +2329,66 @@ void Renderer::DumpSrv(ID3D11ShaderResourceView* srv, uint32_t w, uint32_t h,
 
 // --- Swap --------------------------------------------------------------------------------------
 
+// F12: the next frame is the capture (see capture_request).
+void Renderer::BeginCapture() {
+  SYSTEMTIME t;
+  GetLocalTime(&t);
+  char name[64];
+  snprintf(name, sizeof(name), "%04u%02u%02u-%02u%02u%02u", t.wYear, t.wMonth, t.wDay, t.wHour,
+           t.wMinute, t.wSecond);
+  std::filesystem::path dir = cache_dir_.parent_path() / "captures" / name;
+  std::error_code ec;
+  std::filesystem::create_directories(dir, ec);
+  if (ec) return;
+  out_dir_ = dir;
+  trace_out_.open(dir / "trace.txt");
+  capture_frame_ = trace_frame_ = dump_targets_frame_ = frame_;
+  REXLOG_INFO("bf2native: F12 capture of frame {} -> {}", frame_, dir.string());
+}
+
+// Capture: every texture sampled this frame, levels 0..3 (2D, single slice), as
+// tex_<base>_f<format>_<w>x<h>_m<level>.bmp, and its fetch constant in trace.txt.
+void Renderer::DumpFrameTextures() {
+  std::vector<uint64_t> keys = frame_textures_;
+  std::sort(keys.begin(), keys.end());
+  keys.erase(std::unique(keys.begin(), keys.end()), keys.end());
+  for (uint64_t k : keys) {
+    auto it = textures_.find(k);
+    if (it == textures_.end() || !it->second.res) continue;
+    HostTex& t = it->second;
+    const TexFetch& f = t.fetch;
+    BF2_TRACE("bf2trace: texture {:08X} fmt {} {}x{}x{} dim {} tiled {} levels {} mip {:08X} packed {} "
+              "minmip {} maxmip {} filter mag {} min {} mip {} aniso {} bias {} | {:08X} {:08X} {:08X} {:08X} {:08X} {:08X}",
+              f.base_address(), f.format(), f.width(), f.height(), f.depth(), f.dimension(), f.tiled(),
+              t.levels, f.mip_address(), f.packed_mips(), f.mip_min_level(), f.mip_max_level(),
+              f.mag_filter(), f.min_filter(), f.mip_filter(), f.aniso_filter(), f.lod_bias(), f.d[0],
+              f.d[1], f.d[2], f.d[3], f.d[4], f.d[5]);
+    ComPtr<ID3D11Texture2D> tex2d;
+    if (FAILED(t.res.As(&tex2d))) continue;
+    D3D11_TEXTURE2D_DESC td;
+    tex2d->GetDesc(&td);
+    if (td.ArraySize != 1 || (td.MiscFlags & D3D11_RESOURCE_MISC_TEXTURECUBE)) continue;
+    for (uint32_t l = 0; l < t.levels && l < 4; ++l) {
+      D3D11_SHADER_RESOURCE_VIEW_DESC v{};
+      v.Format = td.Format;
+      v.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+      v.Texture2D.MostDetailedMip = l;
+      v.Texture2D.MipLevels = 1;
+      ComPtr<ID3D11ShaderResourceView> srv;
+      if (FAILED(dev_->CreateShaderResourceView(tex2d.Get(), &v, &srv))) break;
+      uint32_t w = std::max(1u, td.Width >> l), h = std::max(1u, td.Height >> l);
+      char name[80];
+      snprintf(name, sizeof(name), "tex_%08X_f%u_%ux%u_m%u", f.base_address(), f.format(), td.Width,
+               td.Height, l);
+      DumpSrv(srv.Get(), w, h, name);
+    }
+  }
+}
+
 void Renderer::Swap(uint32_t device, uint32_t front_texture) {
   (void)device;
+  bool capturing = frame_ == capture_frame_;
+  if (capturing) DumpFrameTextures();  // before RefreshTextures forgets this frame's list
   RefreshTextures();
   LateSyncMirror();
   {
@@ -2288,23 +2411,6 @@ void Renderer::Swap(uint32_t device, uint32_t front_texture) {
       LogCenterTexel(rt.tex.Get(), name);
     }
   }
-  RECT cr{};
-  GetClientRect(hwnd_, &cr);
-  uint32_t cw = uint32_t(std::max<LONG>(cr.right - cr.left, 1));
-  uint32_t ch = uint32_t(std::max<LONG>(cr.bottom - cr.top, 1));
-  if (cw != back_w_ || ch != back_h_ || !back_rtv_) {
-    back_rtv_.Reset();
-    imm_->OMSetRenderTargets(0, nullptr, nullptr);
-    imm_->ClearState();
-    imm_->Flush();
-    swap_->ResizeBuffers(0, cw, ch, DXGI_FORMAT_UNKNOWN, 0);
-    ComPtr<ID3D11Texture2D> back;
-    swap_->GetBuffer(0, IID_PPV_ARGS(&back));
-    dev_->CreateRenderTargetView(back.Get(), nullptr, &back_rtv_);
-    back_w_ = cw;
-    back_h_ = ch;
-  }
-
   Resolved* r = nullptr;
   if (front_texture) {
     TexFetch f = ReadFetch(front_texture + 16);
@@ -2312,88 +2418,69 @@ void Renderer::Swap(uint32_t device, uint32_t front_texture) {
   }
   auto it = resolved_.find(last_front_base_);
   if (it != resolved_.end()) r = &it->second;
-
-  ID3D11RenderTargetView* rtv = back_rtv_.Get();
-  imm_->OMSetRenderTargets(1, &rtv, nullptr);
-  const float black[4] = {0, 0, 0, 1};
-  imm_->ClearRenderTargetView(rtv, black);
+  // Final picture, settings menu, vsync and frame pacing: pc_settings.cpp.
+  pcs::Picture picture;
   if (r && r->srv_slice0) {
     uint32_t sw = r->used_width ? r->used_width : r->width;
     uint32_t sh = r->used_height ? r->used_height : r->height;
-    float scale = std::min(float(cw) / float(sw), float(ch) / float(sh));
-    float w = float(sw) * scale, h = float(sh) * scale;
-    D3D11_VIEWPORT vp{(float(cw) - w) * 0.5f, (float(ch) - h) * 0.5f, w, h, 0.0f, 1.0f};
-    D3D11_RECT sc{0, 0, LONG(cw), LONG(ch)};
-    D3D11_BLEND_DESC bd;
-  ZeroMemory(&bd, sizeof(bd));
-    bd.RenderTarget[0].SrcBlend = bd.RenderTarget[0].SrcBlendAlpha = D3D11_BLEND_ONE;
-    bd.RenderTarget[0].DestBlend = bd.RenderTarget[0].DestBlendAlpha = D3D11_BLEND_ZERO;
-    bd.RenderTarget[0].BlendOp = bd.RenderTarget[0].BlendOpAlpha = D3D11_BLEND_OP_ADD;
-    bd.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
-    imm_->OMSetBlendState(GetBlend(bd), nullptr, 0xFFFFFFFF);
-    D3D11_DEPTH_STENCIL_DESC dsd;
-  ZeroMemory(&dsd, sizeof(dsd));
-    dsd.DepthFunc = D3D11_COMPARISON_ALWAYS;
-    dsd.FrontFace = {D3D11_STENCIL_OP_KEEP, D3D11_STENCIL_OP_KEEP, D3D11_STENCIL_OP_KEEP,
-                     D3D11_COMPARISON_ALWAYS};
-    dsd.BackFace = dsd.FrontFace;
-    imm_->OMSetDepthStencilState(GetDepthStencil(dsd), 0);
-    D3D11_RASTERIZER_DESC rd;
-  ZeroMemory(&rd, sizeof(rd));
-    rd.FillMode = D3D11_FILL_SOLID;
-    rd.CullMode = D3D11_CULL_NONE;
-    rd.DepthClipEnable = TRUE;
-    rd.ScissorEnable = TRUE;
-    imm_->RSSetState(GetRasterizer(rd));
-    imm_->RSSetViewports(1, &vp);
-    imm_->RSSetScissorRects(1, &sc);
-    UtilConsts u{};
-    u.u3[0] = float(sw) / float(r->width);
-    u.u3[1] = float(sh) / float(r->height);
-    u.u3[2] = r->bgra ? 1.0f : 0.0f;  // front buffers come from resolves (BGRA for 8_8_8_8)
-    UpdateBuffer(imm_.Get(), util_cb_.Get(), &u, sizeof(u));
-    imm_->IASetInputLayout(nullptr);
-    imm_->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-    imm_->VSSetShader(vs_fs_.Get(), nullptr, 0);
-    imm_->VSSetConstantBuffers(0, 1, util_cb_.GetAddressOf());
-    imm_->GSSetShader(nullptr, nullptr, 0);
-    imm_->PSSetShader(ps_present_.Get(), nullptr, 0);
-    imm_->PSSetConstantBuffers(0, 1, util_cb_.GetAddressOf());
-    ID3D11ShaderResourceView* srv = r->srv_slice0.Get();
-    imm_->PSSetShaderResources(0, 1, &srv);
-    imm_->PSSetSamplers(0, 1, linear_clamp_.GetAddressOf());
-    imm_->Draw(3, 0);
-    ID3D11ShaderResourceView* none = nullptr;
-    imm_->PSSetShaderResources(0, 1, &none);
+    picture.srv = r->srv_slice0.Get();
+    picture.width = float(sw);
+    picture.height = float(sh);
+    picture.u1 = float(sw) / float(r->width);
+    picture.v1 = float(sh) / float(r->height);
+    picture.swap_rb = r->bgra;  // front buffers come from resolves (BGRA for 8_8_8_8)
+    if (capturing) DumpSrv(r->srv_slice0.Get(), sw, sh, "frame");
+    if (dump_every_ && frame_ % dump_every_ == 0) {
+      char name[64];
+      snprintf(name, sizeof(name), "frame_%06llu", static_cast<unsigned long long>(frame_));
+      DumpSrv(r->srv_slice0.Get(), sw, sh, name);
+    }
   }
-  if (dump_every_ && frame_ % dump_every_ == 0) DumpBackBuffer();
-  swap_->Present(0, 0);
+  imm_->ClearState();
+  pcs::Present(dev_.Get(), imm_.Get(), swap_.Get(), picture,
+               [this](ID3D11RenderTargetView** rtv, uint32_t* w, uint32_t* h) {
+                 RECT cr{};
+                 GetClientRect(hwnd_, &cr);
+                 uint32_t cw = uint32_t(std::max<LONG>(cr.right - cr.left, 1));
+                 uint32_t ch = uint32_t(std::max<LONG>(cr.bottom - cr.top, 1));
+                 if (cw != back_w_ || ch != back_h_ || !back_rtv_) {
+                   back_rtv_.Reset();
+                   imm_->OMSetRenderTargets(0, nullptr, nullptr);
+                   imm_->ClearState();
+                   imm_->Flush();
+                   if (FAILED(swap_->ResizeBuffers(0, cw, ch, DXGI_FORMAT_UNKNOWN, pcs::SwapChainFlags())))
+                     return false;
+                   ComPtr<ID3D11Texture2D> back;
+                   swap_->GetBuffer(0, IID_PPV_ARGS(&back));
+                   dev_->CreateRenderTargetView(back.Get(), nullptr, &back_rtv_);
+                   back_w_ = cw;
+                   back_h_ = ch;
+                 }
+                 *rtv = back_rtv_.Get();
+                 *w = back_w_;
+                 *h = back_h_;
+                 return back_rtv_ != nullptr;
+               });
 
   if (frame_ <= 5 || frame_ % 600 == 0) {
     REXLOG_INFO("bf2native: frame {}: {} draws ({} skipped), front {:08X}{}", frame_, frame_draws_,
                 frame_skipped_, last_front_base_, r ? "" : " (not resolved)");
   }
   frame_draws_ = frame_skipped_ = 0;
+  if (capturing) {
+    capture_frame_ = UINT32_MAX;
+    trace_out_.close();
+    out_dir_ = cache_dir_.parent_path();
+    REXLOG_INFO("bf2native: F12 capture done");
+  }
   ++frame_;
+  if (capture_request.exchange(false)) BeginCapture();
   if (debug_at_sec_ && std::chrono::steady_clock::now() - init_time_ >= std::chrono::seconds(debug_at_sec_)) {
     debug_at_sec_ = 0;
     trace_frame_ = dump_targets_frame_ = frame_;
     REXLOG_INFO("bf2native: debug capture of frame {}", frame_);
   }
 
-  // Frame limiter: never faster than ~60 Hz (the guest's own vblank wait normally paces it).
-  using clock = std::chrono::steady_clock;
-  const auto min_interval = std::chrono::microseconds(15500);
-  auto target = last_present_ + min_interval;
-  auto now = clock::now();
-  if (now < target) {
-    if (target - now > std::chrono::milliseconds(2)) {
-      std::this_thread::sleep_for(target - now - std::chrono::milliseconds(2));
-    }
-    while (clock::now() < target) std::this_thread::yield();
-    now = clock::now();
-  }
-  last_present_ = now;
 }
 
 }  // namespace
@@ -2474,6 +2561,10 @@ void RendererResolve(uint32_t device, uint32_t flags, uint32_t src_rect, uint32_
   std::lock_guard<std::mutex> lock(g_renderer->mutex);
   g_renderer->Resolve(device, flags, src_rect, dest_texture, dest_point, level, slice, clear_color,
                       clear_z, clear_stencil);
+}
+
+void RendererRequestCapture() {
+  if (g_renderer) g_renderer->capture_request = true;
 }
 
 void RendererSwap(uint32_t device, uint32_t front_texture) {

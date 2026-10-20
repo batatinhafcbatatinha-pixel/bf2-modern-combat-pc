@@ -15,6 +15,7 @@ set(BF2MC_SOURCES
     src/main.cpp
     src/hooks.cpp
     src/input_remap.cpp
+    src/pc_settings.cpp
     src/native_gpu/gpu_hooks.cpp
     src/native_gpu/renderer.cpp
     src/native_gpu/textures.cpp

@@ -24,6 +24,7 @@
 #include <rex/thread.h>
 
 #include <atomic>
+#include <cstdlib>
 #include <chrono>
 #include <deque>
 #include <mutex>
@@ -186,6 +187,34 @@ REX_HOOK_RAW(sub_824841C8) {
     std::lock_guard<std::mutex> lock(g_callback_mutex);
     g_callbacks.push_back(cb);
   }
+}
+
+// --- Shaders -----------------------------------------------------------------------------------
+
+// sub_8248AB00(device, patch, shader, ..., declaration [r7]): loads the vertex shader through the
+// command buffer (IM_LOAD_IMMEDIATE) and patches that copy (see ImmediateVertexShader); the copy
+// ends at the command buffer pointer (device+0) on return.
+REX_HOOK_RAW(sub_8248AB00) {
+  uint32_t device = ctx.r3.u32, shader = ctx.r5.u32, declaration = ctx.r7.u32;
+  uint32_t before = Load32(device);
+  __imp__sub_8248AB00(ctx, base);
+  uint32_t end = Load32(device);
+  static const bool disabled = std::getenv("BF2_NO_IMMEDIATE_VS") != nullptr;  // diagnostics
+  if (disabled || end == before || !shader || !declaration) return;
+  uint32_t size = Load32(shader + 0x258);
+  uint32_t start = end - size + 4;
+  if (!size || size > 0x10000 || (size & 3)) return;
+  auto& imm = bf2n::LoadedImmediateVertexShader();
+  imm.device = device;
+  imm.shader = shader;
+  imm.declaration = declaration;
+  imm.declaration_id = Load32(declaration + 32);
+  const uint8_t* src = Mem() + start + (start >= 0xE0000000u ? 0x1000u : 0u);
+  imm.code.assign(src, src + size);
+  static std::atomic<int> logs{0};
+  if (logs.fetch_add(1) < 8)
+    REXLOG_INFO("bf2native: vertex shader {:08X} loaded through the command buffer ({} bytes at {:08X})", shader,
+                size, start);
 }
 
 // --- Draws -------------------------------------------------------------------------------------
