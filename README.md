@@ -12,7 +12,9 @@ An experimental port of the Xbox 360 version of Battlefield 2: Modern Combat, bu
 - Graphics: the game's Direct3D calls are intercepted and drawn by a native Direct3D 11 renderer; Xenos shader microcode is translated to HLSL. No GPU command processor or emulation plugin.
 - Audio: the XMA and XAudio exports are reimplemented on the host (FFmpeg's XMA decoder, own render driver, SDL3 output). The mix carries real signal, but audio has not yet been checked by ear.
 - The Xbox 360 kernel and XAM services come from the ReXGlue runtime as an operating-system compatibility layer.
-- Known issues: translucent streaks from some particle effects (when the player is hit or near explosions); the first mission load can take 1–2 minutes while shaders compile; mouse support is only lightly tested; multiplayer is not supported.
+- Mouse look turns the camera directly (it does not go through the emulated right stick, so there is no stick curve, acceleration or turn-rate cap); aiming follows the right mouse button reliably.
+- In-game PC options (F1): display mode, internal resolution, vsync, frame limit, FXAA, anisotropic filtering, aspect, volume.
+- Known issues: ground and scenery textures shimmer while the camera moves (under investigation; likely the missing MSAA); translucent streaks from some particle effects (when the player is hit or near explosions); the first mission load can take 1–2 minutes while shaders compile; the game's own aim-sensitivity option does not affect the mouse yet; the stance controls (crouch/prone toggles) are new and not fully tested; multiplayer is not supported.
 - Windows x64 only for now.
 
 ## Why a native port instead of an emulator
@@ -54,22 +56,31 @@ python tools/play.py --game-files game_files
 
 ## Controls
 
-Modern layout (during gameplay only; menus keep the original A = select, B = back). Pass `--bf2_modern_controls=false` after `play.py` for the original console layout.
+Modern layout after Battlefield 6's defaults (during gameplay only; menus keep the original A = select, B = back). Pass `--bf2_modern_controls=false` after `play.py` for the original console layout.
 
 | Action | Controller | Keyboard / mouse |
 | --- | --- | --- |
+| Look | Right stick | Mouse |
 | Aim (hold) | LT | Right mouse button |
 | Fire | RT | Left mouse button |
-| Jump | A | Space |
-| Crouch / prone | B | C |
-| Reload | X | R |
-| Use / enter vehicle | Y | E |
+| Move | Left stick | W A S D |
+| Sprint | L3 | Shift |
+| Jump (stands up when crouched / prone) | A | Space |
+| Crouch / stand (toggle) | B (tap) | C |
+| Crouch while held | — | Ctrl |
+| Prone | B (hold) | Z |
+| Reload | X (tap) | R |
+| Use / enter vehicle | X (hold) or Y | E |
 | Hotswap | LB | Q |
 | Switch weapon | hold RB + right stick | hold F + mouse |
 | Switch seat / call squad | R3 | V |
 | Radio | D-pad | Arrow keys |
 | Pause | Start | Enter / Esc |
 | Back | Back | Tab (Backspace in menus) |
+| PC options | Back + Start | F1 |
+| Renderer debug capture | — | F12 |
+
+Mouse options: `--bf2_mouse_sensitivity=1.0`, `--bf2_mouse_invert=true`, `--bf2_mouse_look=false --mnk_mouse=true` (the SDK's mouse-as-right-stick instead). F12 writes the next frame (draw trace, render targets and every sampled texture with its mip levels) to `captures/<time>/` next to the executable, for bug reports.
 
 ## Credits and licenses
 
