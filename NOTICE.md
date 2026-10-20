@@ -8,6 +8,7 @@ External dependencies are downloaded by `tools/build_local.py` and are not store
 
 - ReXGlue SDK nightly `0.10.0.24-dev.gbd833a2` (BSD-3-Clause, derived from Xenia). `patches/rexglue-fpscr-mask.patch` documents the one-line change applied locally to its `rex/ppc/context.h`. The SDK's GPU emulation plugin is removed from the build output; this port does not use it.
 - FFmpeg public headers from the commit matching the SDK's prebuilt libraries (LGPL-2.1). The libraries themselves come with the SDK.
+- DXVK 3.1.1 (zlib license): its `d3d11.dll` and `dxgi.dll` are copied into `vulkan\` next to the executable for the settings menu's Vulkan option (the same Direct3D 11 renderer, run on Vulkan).
 
 Some native code follows the semantics of Xenia's BSD-licensed headers shipped with the SDK (Xenos shader microcode, texture swizzles and XMA context layouts); the implementation is our own. License texts are in `licenses/`.
 

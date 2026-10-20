@@ -40,3 +40,19 @@ target_link_libraries(bf2mc PRIVATE rex::xxhash d3d11 dxgi d3dcompiler winmm)
 # third_party/ffmpeg.
 target_link_libraries(bf2mc PRIVATE rex::libavcodec rex::libavutil)
 target_include_directories(bf2mc PRIVATE third_party/ffmpeg/include)
+
+# Vulkan option of the settings menu: DXVK's d3d11.dll/dxgi.dll in vulkan\ next to the
+# executable (pc_settings.cpp loads them by full path when "API grafica" is Vulkan).
+set(DXVK_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../third_party/dxvk-3.1.1" CACHE PATH
+    "DXVK release for Windows (x64/d3d11.dll, x64/dxgi.dll, LICENSE)")
+if(WIN32 AND EXISTS "${DXVK_DIR}/x64/d3d11.dll")
+    add_custom_command(TARGET bf2mc POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:bf2mc>/vulkan"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different "${DXVK_DIR}/x64/d3d11.dll" "${DXVK_DIR}/x64/dxgi.dll"
+                "$<TARGET_FILE_DIR:bf2mc>/vulkan/")
+    if(EXISTS "${DXVK_DIR}/LICENSE")
+        add_custom_command(TARGET bf2mc POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different "${DXVK_DIR}/LICENSE"
+                    "$<TARGET_FILE_DIR:bf2mc>/vulkan/LICENSE.dxvk.txt")
+    endif()
+endif()

@@ -62,5 +62,10 @@
   "ffmpeg": {
     "commit": "0604b464c7cb4ebc94940cf1f324a3b26b87717c",
     "url": "https://codeload.github.com/wmarti/FFmpeg/tar.gz/0604b464c7cb4ebc94940cf1f324a3b26b87717c"
+  },
+  "dxvk": {
+    "version": "3.1.1",
+    "url": "https://github.com/doitsujin/dxvk/releases/download/v3.1.1/dxvk-3.1.1.tar.gz",
+    "sha256": "40565b4a724aadc4433fa4e010b4b23916d9b1f1baeee64e17186db94f54e608"
   }
 }

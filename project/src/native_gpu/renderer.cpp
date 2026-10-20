@@ -471,18 +471,8 @@ bool Renderer::Init(HWND hwnd) {
   hwnd_ = hwnd;
   UINT flags = 0;
   if (GetEnvironmentVariableA("BF2_D3D_DEBUG", nullptr, 0)) flags |= D3D11_CREATE_DEVICE_DEBUG;
-  const D3D_FEATURE_LEVEL levels[] = {D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0};
-  D3D_FEATURE_LEVEL got;
-  // PC settings: graphics card chosen in the settings menu (null = Windows default).
-  IDXGIAdapter1* chosen = pcs::Adapter();
-  D3D_DRIVER_TYPE type = chosen ? D3D_DRIVER_TYPE_UNKNOWN : D3D_DRIVER_TYPE_HARDWARE;
-  HRESULT hr = D3D11CreateDevice(chosen, type, nullptr, flags, levels, 2, D3D11_SDK_VERSION, &dev_,
-                                 &got, &imm_);
-  if (hr == E_INVALIDARG) {
-    hr = D3D11CreateDevice(chosen, type, nullptr, flags, levels + 1, 1, D3D11_SDK_VERSION, &dev_, &got,
-                           &imm_);
-  }
-  if (chosen) chosen->Release();
+  // PC settings: graphics API (Direct3D 11 or Vulkan) and card chosen in the settings menu.
+  HRESULT hr = pcs::CreateDevice(flags, &dev_, &imm_);
   scale_ = pcs::ResolutionScale();
   if (scale_ != 1.0f) REXLOG_INFO("bf2native: internal resolution x{:.3f}", scale_);
   if (FAILED(hr)) {
@@ -600,7 +590,8 @@ bool Renderer::Init(HWND hwnd) {
   if (GetEnvironmentVariableA("BF2_DUMP_RESOLVES", env, sizeof(env))) {
     dump_targets_frame_ = uint32_t(atoi(env));
   }
-  REXLOG_INFO("bf2native: Direct3D 11 renderer on {} (feature level {:X})", name, uint32_t(got));
+  REXLOG_INFO("bf2native: {} renderer on {} (feature level {:X})", pcs::Vulkan() ? "Vulkan (DXVK)" : "Direct3D 11", name,
+              uint32_t(dev_->GetFeatureLevel()));
   return true;
 }
 

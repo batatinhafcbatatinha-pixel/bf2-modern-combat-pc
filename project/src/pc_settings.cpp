@@ -65,7 +65,8 @@ const ResPreset k_res[] = {
     {0, L"Resolução do monitor", L"Monitor resolution"},
 };
 constexpr int kNumRes = int(sizeof(k_res) / sizeof(k_res[0]));
-const int k_fps[] = {60, 30, 0};
+const int k_fps[] = {60, kFpsMonitor, 0, 30};
+const int k_fps_fixed[] = {60, 30};
 const int k_aniso[] = {0, 2, 4, 8, 16};
 
 int Clampi(int v, int lo, int hi) { return v < lo ? lo : v > hi ? hi : v; }
@@ -93,6 +94,7 @@ void SaveIni() {
   IniPut(L"fxaa", g_opt.aa);
   IniPut(L"anisotropico", g_opt.aniso);
   IniPut(L"gpu", g_opt.adapter);
+  IniPut(L"api_grafica", g_opt.api);
   IniPut(L"idioma", g_opt.language);
   IniPut(L"volume", g_opt.volume);
   IniPut(L"idioma_menu", g_opt.ui_language);
@@ -177,6 +179,26 @@ int MonitorCurrentHz() {
   return 60;
 }
 
+// The display's rate for "monitor rate" pacing, cached (asked of Windows at most every 2 s).
+std::atomic<int> g_display_hz{60};
+std::atomic<int64_t> g_display_hz_at{0};
+
+int DisplayHz() {
+  int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now().time_since_epoch()).count();
+  if (now - g_display_hz_at.load() > 2000) {
+    g_display_hz_at = now;
+    int hz = g_opt.display == 2 && g_opt.refresh ? g_opt.refresh : MonitorCurrentHz();
+    g_display_hz = std::clamp(hz, 30, 1000);
+  }
+  return g_display_hz.load();
+}
+
+// Frames per second the game should run at (0 = no limit), from the setting.
+int TargetFps() {
+  if (g_opt.fps == kFpsMonitor) return DisplayHz();
+  return g_opt.fps;
+}
+
 void RatesRefresh() {
   const Monitor& m = MonitorCurrent();
   g_rates.clear();
@@ -192,12 +214,60 @@ void RatesRefresh() {
   std::sort(g_rates.begin(), g_rates.end());
 }
 
+// Graphics API. Vulkan is DXVK: vulkan\d3d11.dll and vulkan\dxgi.dll next to the executable,
+// the same D3D11/DXGI interfaces on Vulkan, so one renderer serves both. The SDK runtime links
+// the system dxgi.dll, so DXVK's pair is loaded by full path and only reached through these
+// pointers; the device is always made on a DXVK adapter (DXVK's D3D11CreateDevice with no
+// adapter would create its factory through whichever dxgi.dll the loader binds by name).
+struct GpuApi {
+  bool vulkan = false;
+  decltype(&CreateDXGIFactory1) factory = &CreateDXGIFactory1;
+  decltype(&D3D11CreateDevice) device = &D3D11CreateDevice;
+};
+
+bool VulkanInstalled(wchar_t* dir) {
+  GetModuleFileNameW(nullptr, dir, MAX_PATH);
+  wchar_t* slash = wcsrchr(dir, L'\\');
+  wcscpy(slash ? slash + 1 : dir, L"vulkan\\");
+  wchar_t probe[MAX_PATH];
+  swprintf(probe, MAX_PATH, L"%lsd3d11.dll", dir);
+  return GetFileAttributesW(probe) != INVALID_FILE_ATTRIBUTES;
+}
+
+const GpuApi& Api() {
+  static const GpuApi api = [] {
+    GpuApi a;
+    if (g_boot.api != 1) return a;
+    wchar_t dir[MAX_PATH], path[MAX_PATH];
+    if (!VulkanInstalled(dir)) {
+      REXLOG_WARN("[pc] Vulkan chosen but the vulkan folder is missing: using Direct3D 11");
+      return a;
+    }
+    swprintf(path, MAX_PATH, L"%lsdxgi.dll", dir);
+    HMODULE dxgi = LoadLibraryW(path);
+    swprintf(path, MAX_PATH, L"%lsd3d11.dll", dir);
+    HMODULE d3d = dxgi ? LoadLibraryW(path) : nullptr;
+    auto factory = dxgi ? reinterpret_cast<decltype(&CreateDXGIFactory1)>(GetProcAddress(dxgi, "CreateDXGIFactory1")) : nullptr;
+    auto device = d3d ? reinterpret_cast<decltype(&D3D11CreateDevice)>(GetProcAddress(d3d, "D3D11CreateDevice")) : nullptr;
+    if (!factory || !device) {
+      REXLOG_WARN("[pc] DXVK did not load ({}): using Direct3D 11", uint32_t(GetLastError()));
+      return a;
+    }
+    a.vulkan = true;
+    a.factory = factory;
+    a.device = device;
+    REXLOG_INFO("[pc] graphics API: Vulkan (DXVK)");
+    return a;
+  }();
+  return api;
+}
+
 void GpusRefresh() {
   g_gpus_listed = true;
   g_gpu_name.clear();
   g_gpu_index.clear();
   IDXGIFactory1* f = nullptr;
-  if (FAILED(CreateDXGIFactory1(__uuidof(IDXGIFactory1), reinterpret_cast<void**>(&f)))) return;
+  if (FAILED(Api().factory(__uuidof(IDXGIFactory1), reinterpret_cast<void**>(&f)))) return;
   IDXGIAdapter1* a = nullptr;
   for (UINT i = 0; f->EnumAdapters1(i, &a) != DXGI_ERROR_NOT_FOUND; ++i) {
     DXGI_ADAPTER_DESC1 d;
@@ -248,13 +318,15 @@ Rect g_value_left[IT_COUNT];  // the "◀" end of a selected value
 Rect g_hint_a, g_hint_b;
 
 bool RestartPending() {
-  return g_opt.scale != g_boot.scale || g_opt.adapter != g_boot.adapter || g_opt.language != g_boot.language;
+  return g_opt.scale != g_boot.scale || g_opt.adapter != g_boot.adapter || g_opt.language != g_boot.language ||
+         g_opt.api != g_boot.api;
 }
 
 bool ItemRestart(int it) {
   switch (it) {
     case IT_SCALE: return g_opt.scale != g_boot.scale;
     case IT_GPU: return g_opt.adapter != g_boot.adapter;
+    case IT_API: return g_opt.api != g_boot.api;
     case IT_LANG: return g_opt.language != g_boot.language;
   }
   return false;
@@ -296,7 +368,10 @@ void Change(int it, int d) {
       if (g_opt.display == 2) g_display_dirty = true;
       break;
     case IT_VSYNC: g_opt.vsync = !g_opt.vsync; break;
-    case IT_FPS: g_opt.fps = Cycle(k_fps, 3, g_opt.fps, d); break;
+    case IT_FPS:
+      g_opt.fps = g_info.real_time ? Cycle(k_fps, 4, g_opt.fps, d) : Cycle(k_fps_fixed, 2, g_opt.fps, d);
+      g_display_hz_at = 0;
+      break;
     case IT_SCALE: g_opt.scale = (g_opt.scale + kNumRes + d) % kNumRes; break;
     case IT_ASPECT: g_opt.aspect = !g_opt.aspect; break;
     case IT_AA: g_opt.aa = !g_opt.aa; break;
@@ -307,6 +382,11 @@ void Change(int it, int d) {
       list.insert(list.end(), g_gpu_index.begin(), g_gpu_index.end());
       g_opt.adapter = Cycle(list.data(), int(list.size()), g_opt.adapter, d);
       break;
+    case IT_API: {
+      wchar_t dir[MAX_PATH];
+      if (g_opt.api || VulkanInstalled(dir)) g_opt.api = !g_opt.api;
+      break;
+    }
     case IT_SHOW_FPS: g_opt.show_fps = !g_opt.show_fps; break;
     case IT_UI_LANG: g_opt.ui_language = !g_opt.ui_language; break;
     case IT_LANG:
@@ -335,8 +415,8 @@ void RestartGame() {
   STARTUPINFOW si{};
   si.cb = sizeof(si);
   PROCESS_INFORMATION pi{};
-  REXLOG_INFO("[pc] restarting to apply resolution {}, gpu {}, language {}", g_opt.scale, g_opt.adapter,
-              g_opt.language);
+  REXLOG_INFO("[pc] restarting to apply resolution {}, gpu {}, language {}, api {}", g_opt.scale, g_opt.adapter,
+              g_opt.language, g_opt.api);
   if (CreateProcessW(exe, GetCommandLineW(), nullptr, nullptr, FALSE, 0, nullptr, nullptr, &si, &pi)) {
     CloseHandle(pi.hThread);
     CloseHandle(pi.hProcess);
@@ -361,7 +441,7 @@ void Activate(int it) {
     LeaveExclusive();
     REXLOG_INFO("[pc] quit from the settings menu");
     ExitProcess(0);
-  } else if (it != IT_API) {
+  } else {
     Change(it, 1);
   }
 }
@@ -897,6 +977,7 @@ void ItemText(int it, wchar_t* label, wchar_t* value, bool* greyed) {
     case IT_FPS:
       wcscpy(label, T(L"Limite de quadros", L"Frame limit"));
       if (g_opt.fps == 60) wcscpy(value, L"60 fps (original)");
+      else if (g_opt.fps == kFpsMonitor) swprintf(value, 128, T(L"A do monitor (%d fps)", L"Monitor rate (%d fps)"), DisplayHz());
       else if (g_opt.fps) swprintf(value, 128, L"%d fps", g_opt.fps);
       else wcscpy(value, T(L"Sem limite", L"Unlimited"));
       break;
@@ -924,8 +1005,11 @@ void ItemText(int it, wchar_t* label, wchar_t* value, bool* greyed) {
       break;
     case IT_API:
       wcscpy(label, T(L"API gráfica", L"Graphics API"));
-      wcscpy(value, L"DirectX 11");
-      *greyed = true;
+      wcscpy(value, g_opt.api ? L"Vulkan (DXVK)" : L"DirectX 11");
+      {
+        wchar_t dir[MAX_PATH];
+        *greyed = !g_opt.api && !VulkanInstalled(dir);
+      }
       break;
     case IT_GPU:
       wcscpy(label, T(L"Placa de vídeo", L"Graphics card"));
@@ -961,12 +1045,21 @@ const wchar_t* ItemHelp(int it) {
     case IT_MONITOR: return T(L"Em qual monitor o jogo aparece.", L"Monitor used to display the game.");
     case IT_REFRESH: return T(L"Frequência do monitor na tela cheia exclusiva.", L"Monitor refresh rate in exclusive fullscreen.");
     case IT_VSYNC: return T(L"Espera o monitor para mostrar cada quadro: sem cortes na imagem, um pouco mais de atraso.", L"Synchronizes frames with the monitor to prevent tearing, with slightly more latency.");
-    case IT_FPS: return T(L"O jogo foi feito para 60 quadros por segundo. 30 economiza energia em notebooks.", L"The game was designed for 60 fps. 30 saves power on laptops.");
+    case IT_FPS:
+      if (g_info.real_time)
+        return T(L"60 como no console, a taxa do monitor (mais fluido em telas de 120/144 Hz) ou sem limite. 30 economiza energia.",
+                 L"60 as on the console, the monitor's rate (smoother on 120/144 Hz screens) or no limit. 30 saves power.");
+      return T(L"Este jogo avança um passo por quadro: acima de 60 ele ficaria acelerado. 30 economiza energia em notebooks.",
+               L"This game advances one step per frame: above 60 it would run too fast. 30 saves power on laptops.");
     case IT_SCALE: return T(L"Resolução em que o jogo é desenhado: maior = imagem mais nítida, mais trabalho para a placa.", L"Higher rendering resolutions give a sharper image and increase GPU load.");
     case IT_ASPECT: return T(L"O jogo é 16:9. Em telas de outro formato, com barras ou esticado.", L"The game is 16:9. On other screen shapes: with bars or stretched.");
     case IT_AA: return T(L"FXAA suaviza as bordas serrilhadas com custo quase nulo.", L"FXAA smooths jagged edges with minimal performance cost.");
     case IT_ANISO: return T(L"Deixa nítidas as texturas vistas em ângulo, como o chão.", L"Sharpens textures viewed at an angle, such as the ground.");
-    case IT_API: return T(L"Este port desenha com Direct3D 11.", L"This port renders with Direct3D 11.");
+    case IT_API: {
+      wchar_t dir[MAX_PATH];
+      if (!VulkanInstalled(dir)) return T(L"Direct3D 11. Para Vulkan, falta a pasta vulkan (DXVK) ao lado do jogo.", L"Direct3D 11. Vulkan needs the vulkan folder (DXVK) next to the game.");
+      return T(L"DirectX 11 ou Vulkan (pelo DXVK). Se algo aparecer errado ou travar, experimente a outra. Reinicia o jogo.", L"DirectX 11 or Vulkan (through DXVK). If something looks wrong or stutters, try the other one. Restarts the game.");
+    }
     case IT_GPU: return T(L"Placa de vídeo usada para desenhar o jogo.", L"Graphics card used to render the game.");
     case IT_SHOW_FPS: return T(L"Mostra os quadros por segundo no canto da tela.", L"Shows frames per second in the corner of the screen.");
     case IT_UI_LANG: return T(L"Idioma deste menu de configurações. A mudança é imediata.", L"Language of this settings menu. Changes apply immediately.");
@@ -1019,7 +1112,7 @@ void RenderMenu(ID3D11DeviceContext* ctx) {
          sel ? g_font_bold : g_font, DT_LEFT);
     if (value[0]) {
       wchar_t v[220];
-      bool arrows = sel && it != IT_API;
+      bool arrows = sel;
       swprintf(v, 220, arrows ? L"◀  %ls%ls  ▶" : L"%ls%ls", value, ItemRestart(it) ? L" *" : L"");
       Text(v, x0 + cw / 2, y, x1 - lh / 3, y + lh, sel ? RGB(15, 20, 30) : greyed ? RGB(115, 122, 135) : RGB(190, 205, 230),
            sel ? g_font_bold : g_font, DT_RIGHT);
@@ -1289,7 +1382,7 @@ void PresentAndPace(IDXGISwapChain1* swap, bool menu) {
     REXLOG_WARN("[pc] vsync present blocked for {} ms: pacing on the CPU instead",
                 std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count());
   }
-  int fps = menu ? 60 : g_opt.fps;
+  int fps = menu ? 60 : TargetFps();
   if (!visible) fps = 60;
   if (fps > 0) {
     auto period = std::chrono::nanoseconds(1000000000LL / fps);
@@ -1447,13 +1540,14 @@ void Configure(const GameInfo& info, bool sdk_flags) {
   g_opt.refresh = Clampi(IniGet(L"taxa_hz", 0), 0, 1000);
   g_opt.vsync = IniGet(L"vsync", 1) != 0;
   g_opt.fps = IniGet(L"limite_fps", 60);
-  if (g_opt.fps != 30 && g_opt.fps != 0) g_opt.fps = 60;
+  if (g_opt.fps != 30 && g_opt.fps != 0 && g_opt.fps != kFpsMonitor) g_opt.fps = 60;
   g_opt.scale = info.internal_resolution ? Clampi(IniGet(L"resolucao", 0), 0, kNumRes - 1) : 0;
   g_opt.aspect = Clampi(IniGet(L"proporcao", 0), 0, 1);
   g_opt.aa = Clampi(IniGet(L"fxaa", 0), 0, 1);
   g_opt.aniso = IniGet(L"anisotropico", 0);
   if (std::find(std::begin(k_aniso), std::end(k_aniso), g_opt.aniso) == std::end(k_aniso)) g_opt.aniso = 0;
   g_opt.adapter = Clampi(IniGet(L"gpu", -1), -1, 15);
+  g_opt.api = Clampi(IniGet(L"api_grafica", 0), 0, 1);
   g_opt.language = IniGet(L"idioma", 0);
   if (!LanguageListed(g_opt.language)) g_opt.language = 0;
   g_opt.volume = Clampi(IniGet(L"volume", 100), 0, 100);
@@ -1462,11 +1556,17 @@ void Configure(const GameInfo& info, bool sdk_flags) {
   // Test runs: environment wins over the ini.
   if (info.internal_resolution) g_opt.scale = Clampi(EnvInt("PCS_RESOLUTION", g_opt.scale), 0, kNumRes - 1);
   g_opt.vsync = EnvInt("PCS_VSYNC", g_opt.vsync) != 0;
+  if (int fps = EnvInt("PCS_FPS", -2); fps >= -1) g_opt.fps = fps;
+  if (!info.real_time && g_opt.fps != 30) g_opt.fps = 60;
   g_opt.aa = EnvInt("PCS_FXAA", g_opt.aa) != 0;
   g_opt.aniso = EnvInt("PCS_ANISO", g_opt.aniso);
   g_opt.show_fps = EnvInt("PCS_SHOW_FPS", g_opt.show_fps) != 0;
   g_opt.display = Clampi(EnvInt("PCS_DISPLAY", g_opt.display), 0, 2);
+  if (const char* api = std::getenv("PCS_API"); api && *api) g_opt.api = *api == 'v' || *api == 'V' || *api == '1';
   if (int lang = EnvInt("PCS_LANGUAGE", -1); lang == 0 || LanguageListed(lang)) g_opt.language = lang;
+  // The game-menu entry is published for the other modules of the process (env wins).
+  if (!GetEnvironmentVariableA("PCS_GAME_MENU", nullptr, 0))
+    SetEnvironmentVariableA("PCS_GAME_MENU", IniGet(L"menu_no_jogo", 1) ? "1" : "0");
   g_boot = g_opt;
   g_configured = true;
   if (!sdk_flags) return;
@@ -1533,7 +1633,7 @@ uint32_t SwapChainFlags() {
   static uint32_t flags = [] {
     BOOL allow = FALSE;
     IDXGIFactory5* f5 = nullptr;
-    if (SUCCEEDED(CreateDXGIFactory1(__uuidof(IDXGIFactory5), reinterpret_cast<void**>(&f5)))) {
+    if (SUCCEEDED(Api().factory(__uuidof(IDXGIFactory5), reinterpret_cast<void**>(&f5)))) {
       if (FAILED(f5->CheckFeatureSupport(DXGI_FEATURE_PRESENT_ALLOW_TEARING, &allow, sizeof(allow)))) allow = FALSE;
       f5->Release();
     }
@@ -1544,18 +1644,81 @@ uint32_t SwapChainFlags() {
 }
 
 IDXGIAdapter1* Adapter() {
-  if (g_boot.adapter < 0) return nullptr;
+  if (g_boot.adapter < 0 && !Api().vulkan) return nullptr;
   IDXGIFactory1* f = nullptr;
-  if (FAILED(CreateDXGIFactory1(__uuidof(IDXGIFactory1), reinterpret_cast<void**>(&f)))) return nullptr;
+  if (FAILED(Api().factory(__uuidof(IDXGIFactory1), reinterpret_cast<void**>(&f)))) return nullptr;
   IDXGIAdapter1* a = nullptr;
-  if (FAILED(f->EnumAdapters1(UINT(g_boot.adapter), &a))) a = nullptr;
+  if (FAILED(f->EnumAdapters1(UINT(std::max(g_boot.adapter, 0)), &a))) {
+    a = nullptr;
+    if (Api().vulkan) f->EnumAdapters1(0, &a);  // the card is gone: DXVK's first one
+  }
   f->Release();
   return a;
 }
 
+bool Vulkan() { return Api().vulkan; }
+
+long CreateDevice(unsigned flags, ID3D11Device** device, ID3D11DeviceContext** context) {
+  IDXGIAdapter1* adapter = Adapter();
+  D3D_DRIVER_TYPE type = adapter ? D3D_DRIVER_TYPE_UNKNOWN : D3D_DRIVER_TYPE_HARDWARE;
+  const D3D_FEATURE_LEVEL levels[] = {D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0};
+  HRESULT hr = Api().device(adapter, type, nullptr, flags, levels, 2, D3D11_SDK_VERSION, device, nullptr, context);
+  if (hr == E_INVALIDARG)  // runtimes that do not know 11_1
+    hr = Api().device(adapter, type, nullptr, flags, levels + 1, 1, D3D11_SDK_VERSION, device, nullptr, context);
+  if (FAILED(hr) && Api().vulkan)
+    REXLOG_ERROR("[pc] DXVK could not create a device ({:08X}): is there a Vulkan driver?", uint32_t(hr));
+  if (adapter) adapter->Release();
+  return hr;
+}
+
 float Volume() { return g_open ? 0.0f : float(g_opt.volume) / 100.0f; }
 
+double GuestRefreshHz() {
+  static const double forced = [] {
+    const char* e = std::getenv("PCS_VBLANK_HZ");
+    double v = e && *e ? std::atof(e) : 0.0;
+    return v >= 20.0 && v <= 1000.0 ? v : 0.0;
+  }();
+  if (forced > 0.0) return forced;
+  // The module that shows the menu decides and publishes the rate in the environment, for the
+  // other module of the process (Street 4: the menu lives in the game DLL, the vblank in the
+  // exe). Refreshed four times a second.
+  static std::atomic<int64_t> checked{-1000000};
+  static std::atomic<double> hz{60.0};
+  int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now().time_since_epoch()).count();
+  if (now - checked.load() > 250) {
+    checked = now;
+    double local = 60.0;
+    if (g_info.real_time && !g_open) {
+      int fps = TargetFps();
+      local = fps == 0 ? 500.0 : fps < 60 ? 60.0 : double(fps);
+    }
+    char text[32];
+    if (g_attached) {
+      std::snprintf(text, sizeof(text), "%g", local);
+      SetEnvironmentVariableA("PCS_GUEST_HZ", text);
+      hz = local;
+    } else {
+      DWORD n = GetEnvironmentVariableA("PCS_GUEST_HZ", text, sizeof(text));
+      double shared = n && n < sizeof(text) ? std::atof(text) : 0.0;
+      hz = shared >= 20.0 ? shared : local;
+    }
+  }
+  return hz.load();
+}
+
 bool MenuOpen() { return g_open; }
+
+void RequestMenu() { g_request = true; }
+
+bool GameMenuEntry() {
+  static const bool on = [] {
+    char text[8];
+    DWORD n = GetEnvironmentVariableA("PCS_GAME_MENU", text, sizeof(text));
+    return !(n && n < sizeof(text) && text[0] == '0');
+  }();
+  return on;
+}
 
 void Present(ID3D11Device* device, ID3D11DeviceContext* context, IDXGISwapChain1* swap_chain,
              const Picture& picture, const BackBufferFn& back_buffer) {

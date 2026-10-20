@@ -23,6 +23,7 @@ import validate_game  # noqa: E402
 
 SDK = KIT['sdk']
 FFMPEG = KIT['ffmpeg']
+DXVK = KIT.get('dxvk')
 
 
 def run(args, cwd, env):
@@ -83,6 +84,25 @@ def prepare_ffmpeg_headers(local):
             destination = target.joinpath(*parts[1:])
             destination.parent.mkdir(parents=True, exist_ok=True)
             destination.write_bytes(bundle.extractfile(member).read())
+    return target
+
+
+def prepare_dxvk(local):
+    """DXVK (zlib license): the settings menu's Vulkan option loads its d3d11.dll/dxgi.dll from the vulkan folder."""
+    target = local / 'dxvk'
+    if (target / 'x64/d3d11.dll').is_file():
+        return target
+    archive = download(DXVK['url'], local / 'downloads' / Path(DXVK['url']).name, DXVK['sha256'])
+    with tarfile.open(archive) as bundle:
+        for member in bundle.getmembers():
+            parts = Path(member.name).parts
+            if member.isfile() and parts[1:] in (('x64', 'd3d11.dll'), ('x64', 'dxgi.dll'), ('LICENSE',)):
+                destination = target.joinpath(*parts[1:])
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                destination.write_bytes(bundle.extractfile(member).read())
+    license_text = ROOT / 'licenses/DXVK-LICENSE.txt'
+    if license_text.is_file():
+        shutil.copy2(license_text, target / 'LICENSE')
     return target
 
 
@@ -160,7 +180,8 @@ def main():
     build = local / 'build'
     run([cmake, '-S', project, '-B', build, '-G', 'Ninja', '-DCMAKE_BUILD_TYPE=RelWithDebInfo',
          '-DCMAKE_C_COMPILER=' + clang, '-DCMAKE_CXX_COMPILER=' + clangxx,
-         '-DCMAKE_PREFIX_PATH=' + sdk.as_posix()], local, env)
+         '-DCMAKE_PREFIX_PATH=' + sdk.as_posix(),
+         *(['-DDXVK_DIR=' + prepare_dxvk(local).as_posix()] if DXVK else [])], local, env)
     run([cmake, '--build', build, '--parallel', str(args.jobs), '--target', KIT['target'], *KIT.get('extra_targets', [])], local, env)
     # The port renders and plays audio natively: never ship the SDK's GPU emulation plugin next to it.
     for plugin in build.glob('rexgpu-*'):

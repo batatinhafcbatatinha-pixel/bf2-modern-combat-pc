@@ -13,6 +13,7 @@
 //   on the interrupt thread, since host rendering is synchronous.
 
 #include "native_gpu.h"
+#include "../pc_settings.h"
 
 #include "generated/default/bf2mc_init.h"
 
@@ -105,8 +106,9 @@ void StartInterruptThread() {
     self->SetActiveCpu(2);
     auto* dispatcher = rex::system::kernel_state()->function_dispatcher();
     auto next = std::chrono::steady_clock::now();
-    const auto period = std::chrono::microseconds(16667);
     while (g_vblank_running.load()) {
+      // The rate can change while playing (settings menu): read it every tick.
+      const auto period = std::chrono::microseconds(int64_t(1e6 / pcs::GuestRefreshHz()));
       uint32_t device = g_device.load();
       // GPU callbacks (InsertCallback): the hardware writes {function, data} into the callback
       // block and raises a CP interrupt (source 1) once it reaches them.

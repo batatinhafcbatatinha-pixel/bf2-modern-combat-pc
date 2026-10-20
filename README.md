@@ -82,6 +82,10 @@ Modern layout after Battlefield 6's defaults (during gameplay only; menus keep t
 
 Mouse options: `--bf2_mouse_sensitivity=1.0`, `--bf2_mouse_invert=true`, `--bf2_mouse_look=false --mnk_mouse=true` (the SDK's mouse-as-right-stick instead). F12 writes the next frame (draw trace, render targets and every sampled texture with its mip levels) to `captures/<time>/` next to the executable, for bug reports.
 
+## Settings
+
+**F1** (or Back + Start on a controller) opens the PC settings over the game: display mode, monitor, refresh rate, VSync, frame limit, internal resolution, FXAA, anisotropic filtering, graphics API, graphics card, FPS counter and volume. Settings are saved in `bf2mc-pc.ini` next to the executable. **Graphics API**: DirectX 11, or Vulkan through DXVK (restart); if something looks wrong or stutters, try the other one. **Frame rate**: 60 fps (original) or 30 fps; the menus run at 30 as on the console.
+
 ## Credits and licenses
 
 - Port integration, native renderer, audio and controls: [batatinhafcbatatinha-pixel](https://github.com/batatinhafcbatatinha-pixel).
