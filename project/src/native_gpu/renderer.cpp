@@ -32,6 +32,7 @@
 #include "textures.h"
 #include "cached_state.h"
 #include "parallel_jobs.h"
+#include "shader_compile.h"
 #include "xenos_hlsl.h"
 
 #include <rex/logging.h>
@@ -718,7 +719,7 @@ HRESULT GuardedCompile(const std::string& source, const char* entry, const char*
                        ID3DBlob** blob, ID3DBlob** errors) {
   __try {
     return D3DCompile(source.data(), source.size(), nullptr, nullptr, nullptr, entry, target,
-                      D3DCOMPILE_OPTIMIZATION_LEVEL1, 0, blob, errors);
+                      kShaderCompileFlags, 0, blob, errors);
   } __except (GetExceptionCode() == EXCEPTION_ACCESS_VIOLATION ? EXCEPTION_EXECUTE_HANDLER
                                                                 : EXCEPTION_CONTINUE_SEARCH) {
     return E_UNEXPECTED;
@@ -729,7 +730,8 @@ ComPtr<ID3DBlob> Renderer::Compile(const std::string& source, const char* entry,
                                    const char* target) {
   uint64_t key = XXH3_64bits(source.data(), source.size()) ^
                  (XXH3_64bits(entry, std::strlen(entry)) * 31) ^
-                 (XXH3_64bits(target, std::strlen(target)) * 131);
+                 (XXH3_64bits(target, std::strlen(target)) * 131) ^
+                 (uint64_t(kShaderCompileFlags) * 0x9E3779B185EBCA87ull);
   char name[32];
   snprintf(name, sizeof(name), "%016llx.dxbc", static_cast<unsigned long long>(key));
   std::filesystem::path path = cache_dir_ / name;

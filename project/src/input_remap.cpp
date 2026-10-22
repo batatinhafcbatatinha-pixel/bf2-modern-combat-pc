@@ -82,6 +82,14 @@ constexpr uint32_t kManagerNode = 4216;
 using Clock = std::chrono::steady_clock;
 
 std::atomic<bool> g_paused{false};
+// Optional test aid: retain short default-menu key taps until the guest polls.
+// No desktop input is synthesized here; regular window events feed the latch.
+std::atomic<bool> g_test_menu{true};
+std::atomic<uint16_t> g_test_menu_taps{0};
+bool TestMenuTaps() {
+  static const bool on=[] {const char* v=std::getenv("BF2_TEST_MENU_TAPS"); return v && *v=='1';}();
+  return on;
+}
 
 // The local player's soldier controller (sub_821E1748 r3: +0x20 look state, +0x40 zoom index of
 // the weapon's zoom list) and look state, refreshed by the look hooks every frame.
@@ -201,6 +209,20 @@ class MouseListener final : public rex::ui::WindowInputListener {
  public:
   // F12: frame capture for renderer debugging (native_gpu: captures/<time>/ next to the exe).
   void OnKeyDown(rex::ui::KeyEvent& e) override {
+    if (TestMenuTaps() && g_test_menu && !e.prev_state() && !pcs::MenuOpen() &&
+        REXCVAR_GET(mnk_mode) && !e.is_alt_pressed() && !e.is_ctrl_pressed()) {
+      uint16_t tap=0;
+      switch(int(e.virtual_key())) {
+        case VK_RETURN: tap=kStart; break;
+        case VK_SPACE: tap=kA; break;
+        case VK_BACK: tap=kB; break;
+        case VK_UP: tap=kDpadUp; break;
+        case VK_DOWN: tap=kDpadDown; break;
+        case VK_LEFT: tap=kDpadLeft; break;
+        case VK_RIGHT: tap=kDpadRight; break;
+      }
+      g_test_menu_taps.fetch_or(tap,std::memory_order_relaxed);
+    }
     if (int(e.virtual_key()) == VK_F12 && !pcs::MenuOpen()) {
       if (!e.prev_state()) bf2n::RendererRequestCapture();
       e.set_handled(true);
@@ -321,6 +343,20 @@ REX_HOOK_RAW(sub_8246FE70) {
   if (ctx.r3.u32 != 0 || user >= 4 || !state) return;
 
   bool in_game = InGameplay(base);
+  if (user==0 && TestMenuTaps()) {
+    g_test_menu=!in_game;
+    static uint16_t held=0;
+    static Clock::time_point until;
+    uint16_t tapped=g_test_menu_taps.exchange(0,std::memory_order_relaxed);
+    auto now=Clock::now();
+    if(in_game) held=0;
+    else {
+      if(now>=until) held=0;
+      if(tapped) {held|=tapped; until=now+std::chrono::milliseconds(120);}
+      uint8_t* s=rex::memory::GuestPtr(base,state);
+      rex::memory::store_and_swap<uint16_t>(s+4,rex::memory::load_and_swap<uint16_t>(s+4)|held);
+    }
+  }
   MouseUpdate(in_game);
   bool gameplay = REXCVAR_GET(bf2_modern_controls) && in_game;
   if (LogEnabled()) {

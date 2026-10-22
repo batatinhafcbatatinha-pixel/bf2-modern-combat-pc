@@ -88,7 +88,7 @@ Mouse options: `--bf2_mouse_sensitivity=1.0`, `--bf2_mouse_invert=true`, `--bf2_
 
 ## Renderer profiling and regressions
 
-Set `BF2_PERF=1` and `PCS_FPS_LOG=1` before launching to log FPS and CPU costs of drawing, constant uploads, vertex synchronization and texture hashing/decoding/uploads. The CPU phase timings are nested and are not GPU timestamps. Avoid periodic image captures during throughput measurements, because GPU readback causes stalls.
+For automated menu tests using the default keyboard bindings, `BF2_TEST_MENU_TAPS=1` retains short Enter/Space/Backspace/arrow events for 120 ms so guest polling can observe them. It is off by default and does not change gameplay input. Set `BF2_PERF=1` and `PCS_FPS_LOG=1` before launching to log FPS and CPU costs of drawing, constant uploads, vertex synchronization and texture hashing/decoding/uploads. The CPU phase timings are nested and are not GPU timestamps. Avoid periodic image captures during throughput measurements, because GPU readback causes stalls.
 
 The renderer keeps native triangle/line strips, skips identical constant uploads and pipeline-state changes, hashes textures with persistent workers, and copies linear texture rows with exact SSE2 endian conversion. Full texture data is still checked; no frames, textures or effects are deliberately dropped. F12 captures also include cubemap faces. An optional `step-region.txt` next to the executable, containing `x y width height` (up to 64×64), selects a per-draw diagnostic region on the next F12 capture.
 
@@ -99,7 +99,7 @@ c++ -std=c++23 -O2 -pthread tests/native_regression.cpp -o native-regression
 ./native-regression
 ```
 
-A gameplay profiling session also terminated with an invalid guest-function dispatch; its cause and relation to these changes are still under investigation. Stability is not verified. Colored streaks remain an open rendering issue. The pixel-coordinate rounding correction follows the SDK's translation behavior, but is not a verified fix for those streaks. There is no completed before/after image-quality validation or repeatable same-camera FPS comparison for this change.
+A gameplay profiling session also terminated with an invalid guest-function dispatch; its cause and relation to these changes are still under investigation. Stability is not verified. FXC uses IEEE strictness to retain translated NaN/Inf checks; the disk shader cache includes the compilation flags. Windows developers can run `tests\run-shader-regression.cmd` (Visual Studio C++ and Windows SDK) for game-free D3D11 WARP arithmetic checks and pixel-input NaN compilation checks. This test does not validate the final game image or shader performance. Colored streaks remain an open rendering issue. The pixel-coordinate rounding correction follows the SDK's translation behavior, but is not a verified fix for those streaks. There is no completed before/after image-quality validation or repeatable same-camera FPS comparison for this change.
 
 ## Credits and licenses
 

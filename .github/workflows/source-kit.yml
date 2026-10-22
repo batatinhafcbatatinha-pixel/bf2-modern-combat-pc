@@ -29,9 +29,19 @@ jobs:
           c++ -std=c++23 -O2 -pthread tests/native_regression.cpp -o /tmp/bf2-native-regression
           /tmp/bf2-native-regression
 
+  shader-regression:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Execute game-free shader arithmetic on D3D11 WARP
+        shell: cmd
+        run: tests\run-shader-regression.cmd
+
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: audit
+    needs: [audit, shader-regression]
     runs-on: ubuntu-latest
     permissions:
       contents: write
