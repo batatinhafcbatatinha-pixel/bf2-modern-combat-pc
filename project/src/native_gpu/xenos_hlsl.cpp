@@ -1184,7 +1184,9 @@ XPSOut main(XVSOut xi, bool xface : SV_IsFrontFace) {
     if (opt_.ps_param_gen_reg < 16 && opt_.ps_param_gen_reg < nregs) {
       // X: pixel x (sign = back face), Y: pixel y (sign = point), Z: sign = line, W: 0.
       // In guest pixels: render targets may be drawn at a higher internal resolution (xsys[6].x).
-      h << "  {\n    float4 pg = float4(floor(xi.pos.xy * xsys[6].x), 0.0, 0.0);\n";
+      // Revert internal scaling after rounding the host pixel, preserving sub-guest-pixel
+      // coordinates. Rounding after scaling aliases screen-space texture lookups.
+      h << "  {\n    float4 pg = float4(floor(xi.pos.xy) * xsys[6].x, 0.0, 0.0);\n";
       h << "    uint fl = asuint(xsys[3].z);\n";
       h << "    if ((fl & 1u) && !xface) pg.x = -pg.x;\n";
       h << "    if (fl & 2u) { pg.y = -pg.y; pg.zw = xi.pts.zw; }\n";

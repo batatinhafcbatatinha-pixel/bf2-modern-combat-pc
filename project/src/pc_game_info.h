@@ -10,5 +10,7 @@ inline pcs::GameInfo PcGameInfo() {
   info.window_title = "Battlefield 2: Modern Combat";
   info.ini_name = L"bf2mc-pc.ini";
   info.internal_resolution = true;
+  // Experimental opt-in; high-rate simulation timing still needs gameplay validation.
+  info.unlocked_fps = true;
   return info;
 }

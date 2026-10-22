@@ -8,7 +8,7 @@ An experimental port of the Xbox 360 version of Battlefield 2: Modern Combat, bu
 
 ## Status
 
-- Tested on Windows 11 x64: logos, videos, title, menus, mission briefing and the first single-player mission ("In and Out") with 3D world, HUD and minimap, around 40 fps in the mission.
+- Tested on Windows 11 x64 through the first single-player mission ("In and Out"), including combat. Performance varies substantially with the scene; 60 fps gameplay is not guaranteed. The latest work reduces CPU costs in the renderer without lowering resolution, filtering or effects.
 - Graphics: the game's Direct3D calls are intercepted and drawn by a native Direct3D 11 renderer; Xenos shader microcode is translated to HLSL. No GPU command processor or emulation plugin.
 - Audio: the XMA and XAudio exports are reimplemented on the host (FFmpeg's XMA decoder, own render driver, SDL3 output). The mix carries real signal, but audio has not yet been checked by ear.
 - The Xbox 360 kernel and XAM services come from the ReXGlue runtime as an operating-system compatibility layer.
@@ -84,7 +84,22 @@ Mouse options: `--bf2_mouse_sensitivity=1.0`, `--bf2_mouse_invert=true`, `--bf2_
 
 ## Settings
 
-**F1** (or Back + Start on a controller) opens the PC settings over the game: display mode, monitor, refresh rate, VSync, frame limit, internal resolution, FXAA, anisotropic filtering, graphics API, graphics card, FPS counter and volume. Settings are saved in `bf2mc-pc.ini` next to the executable. **Graphics API**: DirectX 11, or Vulkan through DXVK (restart); if something looks wrong or stutters, try the other one. **Frame rate**: 60 fps (original) or 30 fps; the menus run at 30 as on the console.
+**F1** (or Back + Start on a controller) opens the PC settings over the game: display mode, monitor, refresh rate, VSync, frame limit, internal resolution, FXAA, anisotropic filtering, graphics API, graphics card, FPS counter and volume. Settings are saved in `bf2mc-pc.ini` next to the executable. **Graphics API**: DirectX 11, or Vulkan through DXVK (restart); if something looks wrong or stutters, try the other one. **Frame rate**: 30, 60, the monitor's rate, or experimental **no limit**. Select **VSync off** and **no limit** in F1 to unlock presentation. Physics, animation and audio timing above 60 fps have not been fully validated; select 60 if they behave incorrectly. Uncapping does not guarantee that the machine can render faster. Disabling VSync can introduce tearing.
+
+## Renderer profiling and regressions
+
+Set `BF2_PERF=1` and `PCS_FPS_LOG=1` before launching to log FPS and CPU costs of drawing, constant uploads, vertex synchronization and texture hashing/decoding/uploads. The CPU phase timings are nested and are not GPU timestamps. Avoid periodic image captures during throughput measurements, because GPU readback causes stalls.
+
+The renderer keeps native triangle/line strips, skips identical constant uploads and pipeline-state changes, hashes textures with persistent workers, and copies linear texture rows with exact SSE2 endian conversion. Full texture data is still checked; no frames, textures or effects are deliberately dropped. F12 captures also include cubemap faces. An optional `step-region.txt` next to the executable, containing `x y width height` (up to 64×64), selects a per-draw diagnostic region on the next F12 capture.
+
+Game-free tests for endian conversion, state invalidation and worker synchronization:
+
+```sh
+c++ -std=c++23 -O2 -pthread tests/native_regression.cpp -o native-regression
+./native-regression
+```
+
+A gameplay profiling session also terminated with an invalid guest-function dispatch; its cause and relation to these changes are still under investigation. Stability is not verified. Colored streaks remain an open rendering issue. The pixel-coordinate rounding correction follows the SDK's translation behavior, but is not a verified fix for those streaks. There is no completed before/after image-quality validation or repeatable same-camera FPS comparison for this change.
 
 ## Credits and licenses
 

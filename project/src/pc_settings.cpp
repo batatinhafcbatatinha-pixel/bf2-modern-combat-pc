@@ -369,7 +369,7 @@ void Change(int it, int d) {
       break;
     case IT_VSYNC: g_opt.vsync = !g_opt.vsync; break;
     case IT_FPS:
-      g_opt.fps = g_info.real_time ? Cycle(k_fps, 4, g_opt.fps, d) : Cycle(k_fps_fixed, 2, g_opt.fps, d);
+      g_opt.fps = (g_info.real_time || g_info.unlocked_fps) ? Cycle(k_fps, 4, g_opt.fps, d) : Cycle(k_fps_fixed, 2, g_opt.fps, d);
       g_display_hz_at = 0;
       break;
     case IT_SCALE: g_opt.scale = (g_opt.scale + kNumRes + d) % kNumRes; break;
@@ -1046,7 +1046,7 @@ const wchar_t* ItemHelp(int it) {
     case IT_REFRESH: return T(L"Frequência do monitor na tela cheia exclusiva.", L"Monitor refresh rate in exclusive fullscreen.");
     case IT_VSYNC: return T(L"Espera o monitor para mostrar cada quadro: sem cortes na imagem, um pouco mais de atraso.", L"Synchronizes frames with the monitor to prevent tearing, with slightly more latency.");
     case IT_FPS:
-      if (g_info.real_time)
+      if (g_info.real_time || g_info.unlocked_fps)
         return T(L"60 como no console, a taxa do monitor (mais fluido em telas de 120/144 Hz) ou sem limite. 30 economiza energia.",
                  L"60 as on the console, the monitor's rate (smoother on 120/144 Hz screens) or no limit. 30 saves power.");
       return T(L"Este jogo avança um passo por quadro: acima de 60 ele ficaria acelerado. 30 economiza energia em notebooks.",
@@ -1557,7 +1557,7 @@ void Configure(const GameInfo& info, bool sdk_flags) {
   if (info.internal_resolution) g_opt.scale = Clampi(EnvInt("PCS_RESOLUTION", g_opt.scale), 0, kNumRes - 1);
   g_opt.vsync = EnvInt("PCS_VSYNC", g_opt.vsync) != 0;
   if (int fps = EnvInt("PCS_FPS", -2); fps >= -1) g_opt.fps = fps;
-  if (!info.real_time && g_opt.fps != 30) g_opt.fps = 60;
+  if (!info.real_time && !info.unlocked_fps && g_opt.fps != 30) g_opt.fps = 60;
   g_opt.aa = EnvInt("PCS_FXAA", g_opt.aa) != 0;
   g_opt.aniso = EnvInt("PCS_ANISO", g_opt.aniso);
   g_opt.show_fps = EnvInt("PCS_SHOW_FPS", g_opt.show_fps) != 0;
@@ -1689,9 +1689,9 @@ double GuestRefreshHz() {
   if (now - checked.load() > 250) {
     checked = now;
     double local = 60.0;
-    if (g_info.real_time && !g_open) {
+    if ((g_info.real_time || g_info.unlocked_fps) && !g_open) {
       int fps = TargetFps();
-      local = fps == 0 ? 500.0 : fps < 60 ? 60.0 : double(fps);
+      local = fps == 0 ? 1000.0 : fps < 60 ? 60.0 : double(fps);
     }
     char text[32];
     if (g_attached) {

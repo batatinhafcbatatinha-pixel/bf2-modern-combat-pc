@@ -6,8 +6,8 @@
 // - Shaders: Xenos microcode -> HLSL (xenos_hlsl.cpp) -> D3DCompile, cached in memory and on disk.
 // - Vertex data: a 512 MB raw buffer mirrors guest physical memory; the ranges a draw's fetch
 //   constants reference are hashed in 16 KB chunks and re-uploaded when the CPU changed them.
-// - Indices: read on the CPU, primitive types without a D3D11 equivalent (fans, quads, strips with
-//   restart, line loops) are converted to lists; rectangle lists and points expand in a GS.
+// - Indices: native strips keep their restart markers; fans, quads and line loops are converted
+//   to lists. Rectangle lists and points expand in a GS.
 // - EDRAM: each (EDRAM base, format, size) render target is a host texture. Resolve copies into a
 //   host texture keyed by the destination's physical address, which then takes the place of the
 //   guest texture when sampled (the guest memory is never written: there is no GPU).
@@ -30,6 +30,8 @@
 #include "native_gpu.h"
 #include "pc_game_info.h"
 #include "textures.h"
+#include "cached_state.h"
+#include "parallel_jobs.h"
 #include "xenos_hlsl.h"
 
 #include <rex/logging.h>
@@ -38,6 +40,7 @@
 #include <xxhash.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <bit>
 #include <chrono>
@@ -59,6 +62,23 @@ namespace bf2n {
 namespace {
 
 using Microsoft::WRL::ComPtr;
+
+// Optional host CPU phase timings; nested phases are reported separately.
+struct PerfScope {
+  static bool Enabled() { static bool on = std::getenv("BF2_PERF") != nullptr; return on; }
+  static inline double ms[13]{};
+  static inline uint64_t calls[13]{};
+  int slot; bool active; std::chrono::steady_clock::time_point start;
+  explicit PerfScope(int i) : slot(i), active(Enabled()) { if (active) start = std::chrono::steady_clock::now(); }
+  void Stop() { if (active) { ms[slot] += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now()-start).count(); ++calls[slot]; active = false; } }
+  ~PerfScope() { Stop(); }
+  static void Report(uint32_t frame) {
+    if (!Enabled() || frame % 120) return;
+    REXLOG_INFO("bf2perf: frame {} draw {:.3f} mirror {:.3f} texture {:.3f} late {:.3f} constants {:.3f} shader {:.3f} resolve {:.3f} ms/frame; constant-update calls {}", frame, ms[0]/120, ms[1]/120, ms[2]/120, ms[3]/120, ms[4]/120, ms[5]/120, ms[6]/120, calls[4]);
+    REXLOG_INFO("bf2detail: frame {} texture_hash {:.3f} decode {:.3f} upload {:.3f} prepare {:.3f} bindings {:.3f} pipeline {:.3f} ms/frame; decoded {} textures/120frames", frame, ms[7]/120, ms[8]/120, ms[9]/120, ms[10]/120, ms[11]/120, ms[12]/120, calls[8]);
+    for (int i=0;i<13;++i) { ms[i]=0; calls[i]=0; }
+  }
+};
 
 constexpr uint32_t kPhysicalSize = 0x20000000u;
 constexpr uint32_t kChunkShift = 14;  // 16 KB mirror chunks
@@ -350,6 +370,9 @@ class Renderer {
   ComPtr<ID3D11DeviceContext> ctx_;  // deferred: records the guest frame
   bool buggy_deferred_update_ = false;  // runtime-emulated command lists (UpdateSubresource box bug)
   std::vector<uint64_t> frame_textures_;  // texture cache keys sampled this frame
+  ParallelJobs texture_hash_jobs_;
+  std::vector<HostTex*> texture_hash_inputs_;
+  std::vector<uint64_t> texture_hash_results_;
   ComPtr<IDXGISwapChain1> swap_;
   ComPtr<ID3D11RenderTargetView> back_rtv_;
   uint32_t back_w_ = 0, back_h_ = 0;
@@ -364,6 +387,27 @@ class Renderer {
   uint32_t pool_used_ = 0;
   std::vector<uint32_t> frame_chunks_;
   ComPtr<ID3D11Buffer> vs_consts_, ps_consts_, state_cb_, util_cb_;
+  // Only these three buffers are exclusively written on the deferred context.
+  // Byte comparisons avoid hash collisions and preserve all shader constants exactly.
+  struct ConstantSnapshot {
+    std::vector<uint8_t> bytes;
+    bool valid = false;
+  };
+  ConstantSnapshot constant_snapshots_[3];
+  struct PipelineCache {
+    CachedState<ID3D11BlendState*> blend;
+    CachedState<std::array<float,4>> blend_factor;
+    CachedState<ID3D11DepthStencilState*> depth;
+    CachedState<uint32_t> stencil;
+    CachedState<ID3D11RasterizerState*> raster;
+    CachedState<D3D11_VIEWPORT> viewport;
+    CachedState<D3D11_RECT> scissor;
+    CachedState<D3D11_PRIMITIVE_TOPOLOGY> topology;
+    CachedState<ID3D11VertexShader*> vs;
+    CachedState<ID3D11GeometryShader*> gs;
+    CachedState<ID3D11PixelShader*> ps;
+    bool fixed_bindings = false;
+  } pipeline_cache_;
   ComPtr<ID3D11Buffer> index_ring_;
   uint32_t index_pos_ = 0;
 
@@ -421,9 +465,12 @@ class Renderer {
     const HostRT* rt;
     DXGI_FORMAT format;
     uint32_t slice;
+    uint64_t array_key;
   };
-  std::map<DXGI_FORMAT, StepArray> step_arrays_;
+  std::map<uint64_t, StepArray> step_arrays_;
   std::vector<Step> steps_;
+  // Traced frame: pipeline statistics of every draw (pixels shaded per draw), read after it runs.
+  std::vector<std::pair<uint32_t, ComPtr<ID3D11Query>>> draw_stats_;
   void SaveSteps();
   bool skip_toggle_ = false;
   bool dump_hlsl_ = false;  // BF2_DUMP_HLSL: write each translated shader next to the cache
@@ -448,6 +495,8 @@ class Renderer {
 
  private:
   std::filesystem::path out_dir_;          // where dumps go: next to the exe, or the capture
+  struct UpDump { uint32_t draw, vertices, bytes; };
+  std::vector<UpDump> up_dumps_;           // traced frame: UP vertex data saved at draw time
   uint32_t capture_frame_ = UINT32_MAX;
   std::ofstream trace_out_;
   void TraceLine(const std::string& line) {
@@ -737,6 +786,7 @@ ComPtr<ID3DBlob> Renderer::Compile(const std::string& source, const char* entry,
 // --- Shaders -----------------------------------------------------------------------------------
 
 bool Renderer::ReadUcode(uint32_t object, bool pixel, std::vector<uint32_t>& out) {
+  PerfScope perf(5);
   if (!object) return false;
   uint32_t ptr = LoadV(object + (pixel ? 0x0C : 0x28));
   uint32_t bytes = LoadV(object + (pixel ? 0x3C : 0x258));
@@ -841,7 +891,7 @@ HostRT* Renderer::GetRT(uint32_t base, uint32_t format, uint32_t w, uint32_t h, 
   uint64_t key = uint64_t(base & 0xFFF) | (uint64_t(format & 0xF) << 12) |
                  (uint64_t(depth) << 16) | (uint64_t(w) << 17) | (uint64_t(h) << 31);
   auto it = rts_.find(key);
-  if (it != rts_.end()) return &it->second;
+  if (it != rts_.end() && it->second.scale == ScaleFor(w)) return &it->second;
   HostRT rt;
   rt.width = w;
   rt.height = h;
@@ -964,6 +1014,7 @@ void Renderer::BindTargets(const Targets& t, uint32_t color_mask) {
 //   are refreshed: a single capture gets the final contents, an uncaptured chunk is uploaded
 //   before the frame runs.
 void Renderer::SyncMirror(uint32_t address, uint32_t size, bool force) {
+  PerfScope perf(1);
   if (!size) return;
   address &= 0x1FFFFFFFu;
   size = std::min(size, kPhysicalSize - address);
@@ -1024,14 +1075,18 @@ void Renderer::SyncMirror(uint32_t address, uint32_t size, bool force) {
 }
 
 void Renderer::LateSyncMirror() {
+  PerfScope perf(3);
+  static const bool no_late = std::getenv("BF2_NO_LATE_SYNC") != nullptr;
   const uint8_t* phys = Mem()->physical_membase();
   uint32_t late = 0;
   for (uint32_t c : frame_chunks_) {
+    if (no_late) continue;
     ChunkState& s = chunks_[c];
     if (s.used_frame != frame_ || s.captures > 1 || frame_ - s.changed_frame >= kLateSyncFrames) continue;
     const uint8_t* src = phys + (size_t(c) << kChunkShift);
     uint64_t h = XXH3_64bits(src, size_t(1) << kChunkShift);
     if (h == s.hash) continue;
+    if (frame_ == trace_frame_) BF2_TRACE("bf2trace: late mirror {:08X} captures {}", c << kChunkShift, s.captures);
     if (s.captures == 1 && s.pool_offset != UINT32_MAX) {
       std::memcpy(pool_cpu_.data() + s.pool_offset, src, size_t(1) << kChunkShift);
     } else {
@@ -1387,10 +1442,26 @@ ID3D11SamplerState* Renderer::GetSamplerState(const D3D11_SAMPLER_DESC& d) {
 
 void Renderer::UpdateBuffer(ID3D11DeviceContext* ctx, ID3D11Buffer* buffer, const void* data,
                             size_t size) {
+  PerfScope perf(4);
+  ConstantSnapshot* snapshot = nullptr;
+  if (ctx == ctx_.Get()) {
+    if (buffer == vs_consts_.Get()) snapshot = &constant_snapshots_[0];
+    else if (buffer == ps_consts_.Get()) snapshot = &constant_snapshots_[1];
+    else if (buffer == state_cb_.Get()) snapshot = &constant_snapshots_[2];
+  }
+  if (snapshot && snapshot->valid && snapshot->bytes.size() == size &&
+      std::memcmp(snapshot->bytes.data(), data, size) == 0) return;
   D3D11_MAPPED_SUBRESOURCE m;
   if (SUCCEEDED(ctx->Map(buffer, 0, D3D11_MAP_WRITE_DISCARD, 0, &m))) {
     std::memcpy(m.pData, data, size);
     ctx->Unmap(buffer, 0);
+    if (snapshot) {
+      snapshot->bytes.resize(size);
+      std::memcpy(snapshot->bytes.data(), data, size);
+      snapshot->valid = true;
+    }
+  } else if (snapshot) {
+    snapshot->valid = false;  // failed uploads must be retried
   }
 }
 
@@ -1511,6 +1582,8 @@ bool ConvertPrimitives(uint32_t prim, const std::vector<uint32_t>& in, std::vect
 
 void Renderer::Draw(uint32_t device, uint32_t prim, std::vector<uint32_t>& vids,
                     const UpDraw* up) {
+  PerfScope perf(0);
+  PerfScope prepare_perf(10);
   ++draw_serial_;
   ++frame_draws_;
   auto skip = [&](const char* why) {
@@ -1524,8 +1597,13 @@ void Renderer::Draw(uint32_t device, uint32_t prim, std::vector<uint32_t>& vids,
 
   static thread_local std::vector<uint32_t> indices;
   Kind kind;
-  if (!ConvertPrimitives(prim, vids, indices, kind)) return skip("primitive");
-  if (indices.size() > kIndexRingCount) return skip("too many indices");
+  // DXGI R32 indices use UINT32_MAX as strip cut, matching the restart markers decoded above.
+  // Keep strips on the GPU instead of expanding every triangle and uploading 3x the indices.
+  const bool native_strip = prim == 0x06 || prim == 0x03;
+  if (native_strip) kind = prim == 0x06 ? Kind::kTris : Kind::kLines;
+  else if (!ConvertPrimitives(prim, vids, indices, kind)) return skip("primitive");
+  const auto& host_indices = native_strip ? vids : indices;
+  if (host_indices.size() > kIndexRingCount) return skip("too many indices");
 
   uint32_t mode = Reg(device, 0x2205);
   if (kind == Kind::kTris && (mode & 3) == 3) return;  // both faces culled
@@ -1588,16 +1666,14 @@ void Renderer::Draw(uint32_t device, uint32_t prim, std::vector<uint32_t>& vids,
   vh = std::min(vh, 16384.0f);
   vx = std::clamp(vx, -16384.0f, 16383.0f);
   vy = std::clamp(vy, -16384.0f, 16383.0f);
-  float* sys = reinterpret_cast<float*>(st.xsys);
-  std::memset(sys, 0, sizeof(st.xsys));
+  // Build floats in float storage, then copy their bits. Aliasing a uint32 array through a
+  // float pointer is undefined in optimized C++ and may reorder/drop state writes.
+  std::array<float, kSysFloat4Count * 4> sys{};
   sys[0] = sx; sys[1] = ox; sys[2] = sy; sys[3] = oy;
   sys[4] = sz; sys[5] = oz; sys[6] = 2.0f / vw; sys[7] = 2.0f / vh;
-  st.xsys[8] = ((vte >> 8) & 1) | (((vte >> 9) & 1) << 1) | (((vte >> 10) & 1) << 2);
   sys[9] = (Reg(device, 0x2302) & 1) == 0 ? 0.5f : 0.0f;  // D3D9 pixel centers
   uint32_t colorcontrol = Reg(device, 0x2202);
-  st.xsys[12] = (colorcontrol & 8) ? (colorcontrol & 7) : 7u;
   sys[13] = RegF(device, 0x210E);
-  st.xsys[14] = kind == Kind::kPoints ? 2u : kind == Kind::kLines ? 4u : 1u;
   static const uint32_t kInfo[4] = {0x2001, 0x2003, 0x2004, 0x2005};
   for (int i = 0; i < 4; ++i) {
     int32_t bias = int32_t(Reg(device, kInfo[i]) << 6) >> 26;
@@ -1609,6 +1685,10 @@ void Renderer::Draw(uint32_t device, uint32_t prim, std::vector<uint32_t>& vids,
   sys[22] = float(point_size >> 16) * 2.0f / 16.0f;
   sys[23] = float(point_size & 0xFFFF) * 2.0f / 16.0f;
   sys[24] = 1.0f / t.scale;  // host pixels -> guest pixels (pixel position parameter)
+  std::memcpy(st.xsys, sys.data(), sizeof(st.xsys));
+  st.xsys[8] = ((vte >> 8) & 1) | (((vte >> 9) & 1) << 1) | (((vte >> 10) & 1) << 2);
+  st.xsys[12] = (colorcontrol & 8) ? (colorcontrol & 7) : 7u;
+  st.xsys[14] = kind == Kind::kPoints ? 2u : kind == Kind::kLines ? 4u : 1u;
   UpdateBuffer(state_cb_.Get(), &st, sizeof(st));
 
   static uint32_t consts[1024];
@@ -1625,6 +1705,7 @@ void Renderer::Draw(uint32_t device, uint32_t prim, std::vector<uint32_t>& vids,
     }
   }
 
+  prepare_perf.Stop();
   // --- Vertex data.
   for (uint32_t k = 0; k < 96; ++k) {
     if (!((vs->info.vfetch_used[k >> 6] >> (k & 63)) & 1)) continue;
@@ -1691,7 +1772,7 @@ void Renderer::Draw(uint32_t device, uint32_t prim, std::vector<uint32_t>& vids,
   };
   if (frame_ == trace_frame_) {
     BF2_TRACE("bf2trace: draw {} prim {} n {} vs {:08X} ps {:08X} keys {:016X} {:016X} rt {}x{} c0 {} fmt {} d {} vte {:X} vp {} {} {} {} mode {:X} dc {:X} blend0 {:08X} cmask {:X} cc {:X} pswr {:X} edram {}",
-                frame_draws_, prim, indices.size(), LoadV(device + dev::kVertexShader), ps_object, vs->key,
+                frame_draws_, prim, host_indices.size(), LoadV(device + dev::kVertexShader), ps_object, vs->key,
                 ps ? ps->key : 0,
                 t.width, t.height, t.color[0] ? 1 : 0, t.color[0] ? t.color[0]->guest_format : 99,
                 t.depth ? 1 : 0, Reg(device, 0x2206), vx, vy, vw, vh, mode, Reg(device, 0x2200),
@@ -1703,6 +1784,19 @@ void Renderer::Draw(uint32_t device, uint32_t prim, std::vector<uint32_t>& vids,
                   up->vertex_count, up->stride, up->indexed, AsFloat(Be32(v)), AsFloat(Be32(v + 4)),
                   AsFloat(Be32(v + 8)), AsFloat(Be32(v + 12)), AsFloat(Be32(v + 16)), AsFloat(Be32(v + 20)),
                   AsFloat(Be32(v + 24)), AsFloat(Be32(v + 28)));
+      uint32_t bytes = up->vertex_count * up->stride;
+      BF2_TRACE("bf2trace:   UP vf95 {:08X} {:08X} bytes {} hash {:016X}", st.xf[190], st.xf[191], bytes,
+                  XXH3_64bits(v, bytes));
+      if (!out_dir_.empty() && bytes) {
+        for (int r = 0; r < 4; ++r) {
+          const uint8_t* cr = d + dev::kVsConstants + r * 16;
+          BF2_TRACE("bf2trace:   vsc[{}] {} {} {} {}", r, AsFloat(Be32(cr)), AsFloat(Be32(cr + 4)),
+                      AsFloat(Be32(cr + 8)), AsFloat(Be32(cr + 12)));
+        }
+        std::ofstream f(out_dir_ / ("up_" + std::to_string(frame_draws_) + "_draw.bin"), std::ios::binary);
+        f.write(reinterpret_cast<const char*>(v), bytes);
+        up_dumps_.push_back({frame_draws_, up->vertices, bytes});
+      }
     }
     BF2_TRACE("bf2trace:   cinfo {:08X} dinfo {:08X} surf {:08X} scale {} {} {} off {} {} {} zs {:X} xs {:X}",
                 Reg(device, 0x2001), Reg(device, 0x2002), Reg(device, 0x2000), sx, sy, sz, ox, oy, oz,
@@ -1710,9 +1804,12 @@ void Renderer::Draw(uint32_t device, uint32_t prim, std::vector<uint32_t>& vids,
   }
   // Render targets first: binding an SRV whose resource is still bound as an RTV (e.g. the
   // destination of the previous resolve) would be silently nulled by the runtime.
+  PerfScope bindings_perf(11);
   BindTargets(t, 0xF);
   bind_textures(vs->info, false);
   if (ps) bind_textures(ps->info, true);
+  bindings_perf.Stop();
+  PerfScope pipeline_perf(12);
 
   // --- Output merger.
   uint32_t ps_writes = ps ? ps->info.color_written : 0;
@@ -1758,7 +1855,12 @@ void Renderer::Draw(uint32_t device, uint32_t prim, std::vector<uint32_t>& vids,
     blend_factor[0] = blend_factor[1] = blend_factor[2] = blend_factor[3];
   }
   BindTargets(t, bound_mask);
-  ctx_->OMSetBlendState(GetBlend(bd), blend_factor, 0xFFFFFFFF);
+  auto* blend_state = GetBlend(bd);
+  const bool blend_changed = pipeline_cache_.blend.Changed(blend_state);
+  const bool factor_changed = pipeline_cache_.blend_factor.Changed(
+      {blend_factor[0], blend_factor[1], blend_factor[2], blend_factor[3]});
+  if (blend_changed || factor_changed)
+    ctx_->OMSetBlendState(blend_state, blend_factor, 0xFFFFFFFF);
 
   uint32_t dc = Reg(device, 0x2200);
   uint32_t srm = Reg(device, 0x210D);
@@ -1789,7 +1891,10 @@ void Renderer::Draw(uint32_t device, uint32_t prim, std::vector<uint32_t>& vids,
                      D3D11_COMPARISON_ALWAYS};
     dsd.BackFace = dsd.FrontFace;
   }
-  ctx_->OMSetDepthStencilState(GetDepthStencil(dsd), srm & 0xFF);
+  auto* depth_state = GetDepthStencil(dsd);
+  const bool depth_changed = pipeline_cache_.depth.Changed(depth_state);
+  const bool stencil_changed = pipeline_cache_.stencil.Changed(srm & 0xFF);
+  if (depth_changed || stencil_changed) ctx_->OMSetDepthStencilState(depth_state, srm & 0xFF);
 
   // --- Rasterizer.
   D3D11_RASTERIZER_DESC rd;
@@ -1816,10 +1921,11 @@ void Renderer::Draw(uint32_t device, uint32_t prim, std::vector<uint32_t>& vids,
   }
   rd.DepthClipEnable = !((Reg(device, 0x2204) >> 16) & 1);
   rd.ScissorEnable = TRUE;
-  ctx_->RSSetState(GetRasterizer(rd));
+  auto* raster_state = GetRasterizer(rd);
+  if (pipeline_cache_.raster.Changed(raster_state)) ctx_->RSSetState(raster_state);
 
   D3D11_VIEWPORT vp{vx * t.scale, vy * t.scale, vw * t.scale, vh * t.scale, 0.0f, 1.0f};
-  ctx_->RSSetViewports(1, &vp);
+  if (pipeline_cache_.viewport.Changed(vp)) ctx_->RSSetViewports(1, &vp);
   // Scissor: screen scissor, the device's scissor rect when enabled, and the target.
   uint32_t tl = Reg(device, 0x200E), br = Reg(device, 0x200F);
   LONG x0 = LONG(tl & 0x7FFF), y0 = LONG((tl >> 16) & 0x7FFF);
@@ -1841,14 +1947,17 @@ void Renderer::Draw(uint32_t device, uint32_t prim, std::vector<uint32_t>& vids,
   D3D11_RECT sc{x0, y0, std::min<LONG>(x1, LONG(t.width)), std::min<LONG>(y1, LONG(t.height))};
   if (sc.right <= sc.left || sc.bottom <= sc.top) return;
   sc = ScaledRect(sc, t.scale);
-  ctx_->RSSetScissorRects(1, &sc);
+  if (pipeline_cache_.scissor.Changed(sc)) ctx_->RSSetScissorRects(1, &sc);
 
   // --- Pipeline and draw.
-  ctx_->IASetInputLayout(nullptr);
-  ctx_->IASetPrimitiveTopology(kind == Kind::kPoints  ? D3D11_PRIMITIVE_TOPOLOGY_POINTLIST
+  if (!pipeline_cache_.fixed_bindings) ctx_->IASetInputLayout(nullptr);
+  const auto topology = native_strip ? (prim == 0x06 ? D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP
+                                                                  : D3D11_PRIMITIVE_TOPOLOGY_LINESTRIP)
+                               : kind == Kind::kPoints  ? D3D11_PRIMITIVE_TOPOLOGY_POINTLIST
                                : kind == Kind::kLines ? D3D11_PRIMITIVE_TOPOLOGY_LINELIST
-                                                      : D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-  uint32_t count = uint32_t(indices.size());
+                                                      : D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
+  if (pipeline_cache_.topology.Changed(topology)) ctx_->IASetPrimitiveTopology(topology);
+  uint32_t count = uint32_t(host_indices.size());
   D3D11_MAP map = D3D11_MAP_WRITE_NO_OVERWRITE;
   if (index_pos_ + count > kIndexRingCount || index_pos_ == kIndexRingCount) {
     index_pos_ = 0;
@@ -1856,30 +1965,44 @@ void Renderer::Draw(uint32_t device, uint32_t prim, std::vector<uint32_t>& vids,
   }
   D3D11_MAPPED_SUBRESOURCE m;
   if (FAILED(ctx_->Map(index_ring_.Get(), 0, map, 0, &m))) return;
-  std::memcpy(static_cast<uint32_t*>(m.pData) + index_pos_, indices.data(), count * 4);
+  std::memcpy(static_cast<uint32_t*>(m.pData) + index_pos_, host_indices.data(), count * 4);
   ctx_->Unmap(index_ring_.Get(), 0);
-  ctx_->IASetIndexBuffer(index_ring_.Get(), DXGI_FORMAT_R32_UINT, 0);
+  if (!pipeline_cache_.fixed_bindings) ctx_->IASetIndexBuffer(index_ring_.Get(), DXGI_FORMAT_R32_UINT, 0);
 
   ID3D11Buffer* vcbs[2] = {vs_consts_.Get(), state_cb_.Get()};
   ID3D11Buffer* pcbs[2] = {ps_consts_.Get(), state_cb_.Get()};
-  ctx_->VSSetShader(vs->vs.Get(), nullptr, 0);
-  ctx_->VSSetConstantBuffers(0, 2, vcbs);
+  if (pipeline_cache_.vs.Changed(vs->vs.Get())) ctx_->VSSetShader(vs->vs.Get(), nullptr, 0);
+  if (!pipeline_cache_.fixed_bindings) {
+    ctx_->VSSetConstantBuffers(0, 2, vcbs);
+    ctx_->GSSetConstantBuffers(1, 1, pcbs + 1);
+    ctx_->PSSetConstantBuffers(0, 2, pcbs);
+    pipeline_cache_.fixed_bindings = true;
+  }
   ID3D11GeometryShader* gs = kind == Kind::kPoints  ? gs_point_.Get()
                              : kind == Kind::kRects ? gs_rect_.Get()
                                                     : nullptr;
-  ctx_->GSSetShader(gs, nullptr, 0);
-  if (gs) ctx_->GSSetConstantBuffers(1, 1, pcbs + 1);
-  ctx_->PSSetShader(ps ? ps->ps.Get() : nullptr, nullptr, 0);
-  if (ps) ctx_->PSSetConstantBuffers(0, 2, pcbs);
+  if (pipeline_cache_.gs.Changed(gs)) ctx_->GSSetShader(gs, nullptr, 0);
+  auto* pixel_shader = ps ? ps->ps.Get() : nullptr;
+  if (pipeline_cache_.ps.Changed(pixel_shader)) ctx_->PSSetShader(pixel_shader, nullptr, 0);
+  ComPtr<ID3D11Query> stats;
+  if (frame_ == trace_frame_) {
+    D3D11_QUERY_DESC qd{D3D11_QUERY_PIPELINE_STATISTICS, 0};
+    if (SUCCEEDED(dev_->CreateQuery(&qd, &stats))) ctx_->Begin(stats.Get());
+  }
   ctx_->DrawIndexed(count, index_pos_, 0);
   index_pos_ += count;
+  if (stats) {
+    ctx_->End(stats.Get());
+    draw_stats_.emplace_back(frame_draws_, stats);
+  }
 
   HostRT* rt0 = t.color[0];
   if (step_on_ && frame_ == trace_frame_ && rt0 && rt0->width >= step_box_.right &&
       rt0->height >= step_box_.bottom) {
     D3D11_TEXTURE2D_DESC rd;
     rt0->tex->GetDesc(&rd);
-    StepArray& a = step_arrays_[rd.Format];
+    const uint64_t array_key = uint64_t(rd.Format) | (uint64_t(frame_draws_ / 1024) << 32);
+    StepArray& a = step_arrays_[array_key];
     if (!a.tex) {
       D3D11_TEXTURE2D_DESC d = rd;
       d.Width = step_box_.right - step_box_.left;
@@ -1896,7 +2019,7 @@ void Renderer::Draw(uint32_t device, uint32_t prim, std::vector<uint32_t>& vids,
     }
     if (a.tex && a.used < 1024) {
       ctx_->CopySubresourceRegion(a.tex.Get(), a.used, 0, 0, 0, rt0->tex.Get(), 0, &step_box_);
-      steps_.push_back({frame_draws_, rt0, rd.Format, a.used++});
+      steps_.push_back({frame_draws_, rt0, rd.Format, a.used++, array_key});
     }
   }
 }
@@ -1907,7 +2030,7 @@ void Renderer::SaveSteps() {
   std::map<const HostRT*, std::vector<uint8_t>> prev;
   uint32_t dumped = 0;
   for (const Step& st : steps_) {
-    StepArray& a = step_arrays_[st.format];
+    StepArray& a = step_arrays_[st.array_key];
     D3D11_TEXTURE2D_DESC d;
     a.tex->GetDesc(&d);
     d.ArraySize = 1;
@@ -1921,8 +2044,15 @@ void Renderer::SaveSteps() {
     imm_->CopySubresourceRegion(staging.Get(), 0, 0, 0, 0, a.tex.Get(), st.slice, nullptr);
     D3D11_MAPPED_SUBRESOURCE m;
     if (FAILED(imm_->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &m))) break;
-    std::vector<uint8_t> cur(size_t(m.RowPitch) * h);
-    std::memcpy(cur.data(), m.pData, cur.size());
+    // GPU row padding is undefined and may differ after every copy of identical pixels.
+    // Comparing it used up the dump budget on unchanged draws and hid the actual culprit.
+    const uint32_t bpp = (d.Format == DXGI_FORMAT_R16G16B16A16_FLOAT ||
+                          d.Format == DXGI_FORMAT_R16G16B16A16_TYPELESS ||
+                          d.Format == DXGI_FORMAT_R32G32_FLOAT) ? 8 : 4;
+    std::vector<uint8_t> cur(size_t(w) * bpp * h);
+    for (uint32_t y = 0; y < h; ++y)
+      std::memcpy(cur.data() + size_t(y) * w * bpp,
+          static_cast<const uint8_t*>(m.pData) + size_t(y) * m.RowPitch, size_t(w) * bpp);
     imm_->Unmap(staging.Get(), 0);
     auto& p = prev[st.rt];
     size_t diff = 0;
@@ -1955,6 +2085,7 @@ void Renderer::SaveSteps() {
 
 void Renderer::ClearTargetsWithDraw(const Targets& t, const D3D11_RECT& guest_rect, uint32_t flags,
                                     const float color[4], float z, uint32_t stencil) {
+  pipeline_cache_ = {};  // utility pass writes the deferred pipeline directly
   const D3D11_RECT rect = ScaledRect(guest_rect, t.scale);
   ID3D11RenderTargetView* rtvs[4] = {};
   for (uint32_t i = 0; i < 4; ++i) {
@@ -2047,6 +2178,8 @@ void Renderer::Clear(uint32_t device, uint32_t count, uint32_t rects, uint32_t f
 void Renderer::Resolve(uint32_t device, uint32_t flags, uint32_t src_rect, uint32_t dest_texture,
                        uint32_t dest_point, uint32_t level, uint32_t slice, uint32_t clear_color,
                        float clear_z, uint32_t clear_stencil) {
+  PerfScope perf(6);
+  pipeline_cache_ = {};
   Targets t;
   if (!CurrentTargets(device, t)) return;
   uint32_t source = flags & 7;
@@ -2156,16 +2289,30 @@ void Renderer::Resolve(uint32_t device, uint32_t flags, uint32_t src_rect, uint3
 // decoded (video frames, dynamic textures). Runs on the immediate context before the frame's
 // command list, so the recorded draws see the final contents.
 void Renderer::RefreshTextures() {
+  PerfScope perf(2);
   const uint8_t* phys = Mem()->physical_membase();
+  texture_hash_inputs_.clear();
   for (uint64_t k : frame_textures_) {
     auto it = textures_.find(k);
     if (it == textures_.end() || !it->second.res) continue;
-    HostTex& t = it->second;
-    uint64_t h = HashTextureMemory(phys, t.fetch);
+    texture_hash_inputs_.push_back(&it->second);
+  }
+  texture_hash_results_.resize(texture_hash_inputs_.size());
+  {
+    PerfScope hash_perf(7);
+    texture_hash_jobs_.Run(texture_hash_inputs_.size(), [&](size_t i) {
+      texture_hash_results_[i] = HashTextureMemory(phys, texture_hash_inputs_[i]->fetch);
+    });
+  }
+  for (size_t i=0;i<texture_hash_inputs_.size();++i) {
+    HostTex& t = *texture_hash_inputs_[i];
+    uint64_t h = texture_hash_results_[i];
     if (h == t.mem_hash) continue;
-    t.mem_hash = h;
     HostTexture ht;
+    PerfScope decode_perf(8);
     if (!DecodeTexture(phys, t.fetch, ht)) continue;
+    decode_perf.Stop();
+    PerfScope upload_perf(9);
     uint32_t array = ht.is_3d ? 1 : ht.depth;
     for (uint32_t s = 0; s < array; ++s) {
       for (uint32_t l = 0; l < t.levels && l < ht.levels; ++l) {
@@ -2175,6 +2322,7 @@ void Renderer::RefreshTextures() {
                                 sub.data.data(), sub.row_pitch, sub.slice_pitch);
       }
     }
+    t.mem_hash = h;  // do not cache a failed decode as if it had reached the GPU
   }
   frame_textures_.clear();
 }
@@ -2322,6 +2470,15 @@ void Renderer::DumpSrv(ID3D11ShaderResourceView* srv, uint32_t w, uint32_t h,
 
 // F12: the next frame is the capture (see capture_request).
 void Renderer::BeginCapture() {
+  // Optional live diagnostic probe; avoids restarting the game to move the sampled pixel.
+  {
+    std::ifstream probe(cache_dir_.parent_path() / "step-region.txt");
+    unsigned x,y,w,h;
+    if (probe >> x >> y >> w >> h; probe && w && h && w <= 64 && h <= 64) {
+      step_box_ = D3D11_BOX{x,y,0,x+w,y+h,1};
+      step_on_ = true;
+    }
+  }
   SYSTEMTIME t;
   GetLocalTime(&t);
   char name[64];
@@ -2354,6 +2511,17 @@ void Renderer::DumpFrameTextures() {
               t.levels, f.mip_address(), f.packed_mips(), f.mip_min_level(), f.mip_max_level(),
               f.mag_filter(), f.min_filter(), f.mip_filter(), f.aniso_filter(), f.lod_bias(), f.d[0],
               f.d[1], f.d[2], f.d[3], f.d[4], f.d[5]);
+    if (f.dimension() == 3 && f.format() == 6) {
+      HostTexture cube;
+      if (DecodeTexture(Mem()->physical_membase(), f, cube) && cube.format == DXGI_FORMAT_R8G8B8A8_UNORM) {
+        for (uint32_t face = 0; face < 6; ++face) {
+          const auto& sub = cube.subs[face*cube.levels];
+          char name[80];
+          snprintf(name,sizeof(name),"cube_%08X_face%u",f.base_address(),face);
+          if (!sub.data.empty()) WriteBmp(name,sub.data.data(),sub.row_pitch,cube.width,cube.height);
+        }
+      }
+    }
     ComPtr<ID3D11Texture2D> tex2d;
     if (FAILED(t.res.As(&tex2d))) continue;
     D3D11_TEXTURE2D_DESC td;
@@ -2381,12 +2549,31 @@ void Renderer::Swap(uint32_t device, uint32_t front_texture) {
   bool capturing = frame_ == capture_frame_;
   if (capturing) DumpFrameTextures();  // before RefreshTextures forgets this frame's list
   RefreshTextures();
+  // Traced frame: UP vertex data as it is when the frame executes (compare with up_<n>_draw.bin).
+  for (const UpDump& u : up_dumps_) {
+    const uint8_t* v = Virt(u.vertices);
+    uint64_t h = XXH3_64bits(v, u.bytes);
+    BF2_TRACE("bf2trace: UP draw {} at swap hash {:016X}", u.draw, h);
+    std::ofstream f(out_dir_ / ("up_" + std::to_string(u.draw) + "_swap.bin"), std::ios::binary);
+    f.write(reinterpret_cast<const char*>(v), u.bytes);
+  }
+  up_dumps_.clear();
   LateSyncMirror();
   {
     ComPtr<ID3D11CommandList> list;
     if (SUCCEEDED(ctx_->FinishCommandList(FALSE, &list))) imm_->ExecuteCommandList(list.Get(), FALSE);
+    // Each command list must start with a WRITE_DISCARD map for every dynamic buffer.
+    for (auto& snapshot : constant_snapshots_) snapshot.valid = false;
+    pipeline_cache_ = {};
     index_pos_ = kIndexRingCount;  // the next command list must start with a discarding map
   }
+  for (auto& [draw, q] : draw_stats_) {
+    D3D11_QUERY_DATA_PIPELINE_STATISTICS ps{};
+    while (imm_->GetData(q.Get(), &ps, sizeof(ps), 0) == S_FALSE) std::this_thread::yield();
+    BF2_TRACE("bf2stats: draw {} ia_prims {} clip_prims {} ps {}", draw, ps.IAPrimitives, ps.CPrimitives,
+              ps.PSInvocations);
+  }
+  draw_stats_.clear();
   if (frame_ == dump_targets_frame_) {
     SaveSteps();
     char name[64];
@@ -2428,6 +2615,12 @@ void Renderer::Swap(uint32_t device, uint32_t front_texture) {
     }
   }
   imm_->ClearState();
+  // A new internal resolution from the settings menu takes effect from the next frame: targets
+  // and resolve destinations of another scale are recreated as they are used.
+  if (float s = pcs::ResolutionScale(); s != scale_) {
+    REXLOG_INFO("bf2native: internal resolution x{:.3f} -> x{:.3f}", scale_, s);
+    scale_ = s;
+  }
   pcs::Present(dev_.Get(), imm_.Get(), swap_.Get(), picture,
                [this](ID3D11RenderTargetView** rtv, uint32_t* w, uint32_t* h) {
                  RECT cr{};
@@ -2465,6 +2658,7 @@ void Renderer::Swap(uint32_t device, uint32_t front_texture) {
     REXLOG_INFO("bf2native: F12 capture done");
   }
   ++frame_;
+  PerfScope::Report(frame_);
   if (capture_request.exchange(false)) BeginCapture();
   if (debug_at_sec_ && std::chrono::steady_clock::now() - init_time_ >= std::chrono::seconds(debug_at_sec_)) {
     debug_at_sec_ = 0;

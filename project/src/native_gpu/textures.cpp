@@ -1,6 +1,7 @@
 // bf2mc native GPU - guest texture decoding (see textures.h).
 
 #include "textures.h"
+#include "texture_copy.h"
 
 #include <xxhash.h>
 
@@ -484,6 +485,17 @@ bool DecodeTexture(const uint8_t* mem, const TexFetch& t, HostTexture& out) {
       sub.slice_pitch = row_pitch * out_rows;
       sub.data.assign(size_t(sub.slice_pitch) * ld + 64, 0);
       uint32_t slice_base = level_base + slice * ll.array_stride;
+      if (!t.tiled() && f.conv == kCopy) {
+        for (uint32_t z = 0; z < ld; ++z) {
+          for (uint32_t y = 0; y < bh; ++y) {
+            uint32_t address = slice_base + (z + pz) * ll.row_pitch_bytes * ll.slice_rows +
+                               (y + py) * ll.row_pitch_bytes + px * f.bpb;
+            CopyTextureRow(mem, address, bw * f.bpb, sx,
+                sub.data.data() + size_t(z) * sub.slice_pitch + size_t(y) * row_pitch);
+          }
+        }
+        continue;
+      }
       for (uint32_t z = 0; z < ld; ++z) {
         for (uint32_t by = 0; by < bh; ++by) {
           for (uint32_t bx = 0; bx < bw; ++bx) {

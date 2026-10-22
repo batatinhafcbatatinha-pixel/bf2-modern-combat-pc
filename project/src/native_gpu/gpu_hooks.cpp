@@ -73,10 +73,11 @@ uint32_t MmioRead(void*, void*, uint32_t addr) {
   switch (r) {
     case 0x0F00: return 0x08100748;  // RB_EDRAM_TIMING
     case 0x0F01: return 0x0000200E;  // RB_BC_CONTROL
-    case 0x194C: {                   // D1MODE_V_COUNTER: scanline from the 60 Hz clock
+    case 0x194C: {                   // D1MODE_V_COUNTER: same clock as display interrupts
       auto now = std::chrono::steady_clock::now().time_since_epoch();
       uint64_t us = std::chrono::duration_cast<std::chrono::microseconds>(now).count();
-      return uint32_t((us % 16667) * 750 / 16667);
+      const uint64_t period_us = uint64_t(1e6 / pcs::GuestRefreshHz());
+      return uint32_t((us % period_us) * 750 / period_us);
     }
     case 0x1951: return 1;                    // interrupt status: vblank
     case 0x1961: return (1280u << 16) | 720u;  // D1MODE_VIEWPORT_SIZE

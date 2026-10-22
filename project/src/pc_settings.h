@@ -65,6 +65,8 @@ struct GameInfo {
   // it may run above 60 fps, so the menu offers "monitor rate" and "no limit". Games that
   // advance one fixed step per frame keep 60 (more frames would speed them up).
   bool real_time = false;
+  // Explicit opt-in before high-rate simulation timing has been validated.
+  bool unlocked_fps = false;
   int native_width = 1280, native_height = 720;
   // Football games: the keyboard plays as the controller with the EA SPORTS FC 27 "WASD"
   // layout (basic actions only), unless the ini has teclado=0.
@@ -100,7 +102,7 @@ long CreateDevice(unsigned flags, ID3D11Device** device, ID3D11DeviceContext** c
 float Volume();                   // 0..1 (0 while the menu is open)
 // Rate of the guest's vertical blank: the vblank interrupt and the flip pacing of the
 // presentation interval. 60 as on the console; for a real-time game, the chosen frame rate
-// (the monitor's, or 500 with no limit). Changes live: read it every tick. PCS_VBLANK_HZ
+// (the monitor's, or 1000 with no limit). Changes live: read it every tick. PCS_VBLANK_HZ
 // forces a rate (timing experiments).
 double GuestRefreshHz();
 bool MenuOpen();

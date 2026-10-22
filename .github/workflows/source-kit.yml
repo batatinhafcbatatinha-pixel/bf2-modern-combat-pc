@@ -24,6 +24,10 @@ jobs:
         run: python tools/audit_publication.py --zip dist/bf2-modern-combat-pc-source-kit.zip
       - name: Test ISO extraction and file validation without a game
         run: python tools/test_tools.py -v
+      - name: Test renderer byte copies, cached states and worker synchronization
+        run: |
+          c++ -std=c++23 -O2 -pthread tests/native_regression.cpp -o /tmp/bf2-native-regression
+          /tmp/bf2-native-regression
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')
