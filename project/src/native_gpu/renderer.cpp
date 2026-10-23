@@ -410,7 +410,7 @@ class Renderer {
     bool fixed_bindings = false;
   } pipeline_cache_;
   ComPtr<ID3D11Buffer> index_ring_;
-  uint32_t index_pos_ = 0;
+  uint32_t index_pos_ = kIndexRingCount;  // first deferred map must discard
 
   ComPtr<ID3D11VertexShader> vs_fs_;
   ComPtr<ID3D11PixelShader> ps_clear_, ps_copy_, ps_present_;
@@ -1966,7 +1966,10 @@ void Renderer::Draw(uint32_t device, uint32_t prim, std::vector<uint32_t>& vids,
     map = D3D11_MAP_WRITE_DISCARD;
   }
   D3D11_MAPPED_SUBRESOURCE m;
-  if (FAILED(ctx_->Map(index_ring_.Get(), 0, map, 0, &m))) return;
+  if (FAILED(ctx_->Map(index_ring_.Get(), 0, map, 0, &m))) {
+    index_pos_ = kIndexRingCount;  // retry with DISCARD after a failed upload
+    return;
+  }
   std::memcpy(static_cast<uint32_t*>(m.pData) + index_pos_, host_indices.data(), count * 4);
   ctx_->Unmap(index_ring_.Get(), 0);
   if (!pipeline_cache_.fixed_bindings) ctx_->IASetIndexBuffer(index_ring_.Get(), DXGI_FORMAT_R32_UINT, 0);

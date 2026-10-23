@@ -2,6 +2,9 @@ Source kit only: no game, no XEX, no generated code and no executable. Bring you
 
 Renderer update — 2026-10-22:
 
+- Make equivalent position-export dot products accumulate in a stable order and mark position output precise. Captured terrain replay is bit-identical across depth/color variants; the tested first-mission snow pattern is fixed. A separate colored wall above the ground remains unresolved. Add a game-free WARP regression covering 48 translated permutations and a failing legacy cancellation case.
+- Start the deferred index ring with a DISCARD map and retry with DISCARD after an upload failure; D3D11 debug validation confirms the startup map error is gone.
+
 - Cache identical shader constants and pipeline states within a command list, with invalidation after utility passes and command-list completion.
 - Keep native triangle/line strips instead of expanding every primitive on the CPU; check full texture memory using persistent workers; accelerate linear texture decoding with exact SSE2 endian copies.
 - Add optional CPU phase profiling and repair per-draw captures so undefined GPU row padding no longer hides real pixel changes. Capture cubemap faces for reflection diagnostics.

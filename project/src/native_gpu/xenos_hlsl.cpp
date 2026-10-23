@@ -435,7 +435,23 @@ void Translator::EmitAlu(const uint32_t* w) {
       case 12: e = "(v0 == 0.0) ? v1 : v2"; break;
       case 13: e = "(v0 >= 0.0) ? v1 : v2"; break;
       case 14: e = "(v0 > 0.0) ? v1 : v2"; break;
-      case 15: e = "xdot4(v0, v1).xxxx"; break;
+      case 15: {
+        // Position-only and shaded variants may permute the same dot-product
+        // terms. Accumulate in constant-component order for invariant geometry.
+        int ci = !is_temp[0] ? 0 : (!is_temp[1] ? 1 : -1);
+        std::string order(4, 'x');
+        uint32_t seen = 0;
+        if (target == kTgtPos && ci >= 0) {
+          for (uint32_t j = 0; j < 4; ++j) {
+            uint32_t component = ((swz[ci] >> (2 * j)) + j) & 3;
+            seen |= 1u << component;
+            order[component] = kComp[j];
+          }
+        }
+        e = seen == 15 ? Fmt("xdot4(v0.%s, v1.%s).xxxx", order.c_str(), order.c_str())
+                       : "xdot4(v0, v1).xxxx";
+        break;
+      }
       case 16: e = "xdot3(v0, v1).xxxx"; break;
       case 17: e = "(xmul(v0.x, v1.x) + xmul(v0.y, v1.y) + v2.x).xxxx"; break;
       case 18: e = "xcube(v0, v1)"; break;
@@ -1017,7 +1033,7 @@ cbuffer XState : register(b1) {
   float4 xsys[8];
 };
 struct XVSOut {
-  float4 pos : SV_Position;
+  precise float4 pos : SV_Position;
   float4 o[16] : TEXCOORD0;
   float4 pts : TEXCOORD16;
 };
