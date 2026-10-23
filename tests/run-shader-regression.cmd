@@ -14,4 +14,6 @@ if errorlevel 1 exit /b 1
 cl /nologo /std:c++20 /EHsc /O2 "%~dp0position_regression.cpp" "%~dp0..\project\src\native_gpu\xenos_hlsl.cpp" /Fe:"%BF2_SHADER_TEST%-position.exe" /Fo:"%TEMP%\\" /link d3d11.lib d3dcompiler.lib
 if errorlevel 1 exit /b 1
 "%BF2_SHADER_TEST%-position.exe"
+if errorlevel 1 exit /b 1
+call "%~dp0run-vertex-fetch-bounds.cmd"
 exit /b %ERRORLEVEL%

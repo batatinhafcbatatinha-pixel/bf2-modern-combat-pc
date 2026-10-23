@@ -650,6 +650,8 @@ void Translator::EmitVfetch(const uint32_t* w) {
   if (!mini) {
     std::string idx = Temp(src, src_rel) + "." + kComp[src_comp];
     std::string fc0 = FetchDword(fc_index * 2);
+    Line(Fmt("vbo = %s & ~3u;", fc0.c_str()));
+    Line(Fmt("vfl = ((%s >> 2u) & 0xFFFFFFu) * 4u;", FetchDword(fc_index * 2 + 1).c_str()));
     if (stride) {
       Line(Fmt("int vfi = int(floor(%s%s));", idx.c_str(), rounded ? " + 0.5" : ""));
       Line(Fmt("vfb = (%s & ~3u) + uint(vfi * %u);", fc0.c_str(), stride * 4));
@@ -673,6 +675,12 @@ void Translator::EmitVfetch(const uint32_t* w) {
   else if (words == 2) Line("uint4 vw = uint4(xvmem.Load2(vfa), 0, 0);");
   else if (words == 3) Line("uint4 vw = uint4(xvmem.Load3(vfa), 0);");
   else Line("uint4 vw = xvmem.Load4(vfa);");
+  // The shared physical-memory SRV extends beyond each guest vertex buffer.
+  // Mask each word against the fetch descriptor before unpacking, including
+  // partial elements. Mini fetches inherit the full fetch's base and length.
+  for (uint32_t i = 0; i < words; ++i) {
+    Line(Fmt("vw.%c = (vfa + %uu - vbo < vfl) ? vw.%c : 0u;", kComp[i], i * 4, kComp[i]));
+  }
   Line("vw = xswap(vw, vfe);");
 
   // Unpack.
@@ -1213,7 +1221,7 @@ XPSOut main(XVSOut xi, bool xface : SV_IsFrontFace) {
   h << "  float ps = 0.0;\n  bool p0 = false;\n  int a0 = 0;\n  int aL = 0;\n  int lc = 0;\n";
   h << "  int lst[4] = {0, 0, 0, 0};\n  int lit[4] = {0, 0, 0, 0};\n  int lsp = 0;\n";
   h << "  uint cst[4] = {0u, 0u, 0u, 0u};\n  int csp = 0;\n";
-  h << "  uint vfb = 0u, vfe = 0u;\n  float xlod = 0.0;\n  float3 xgh = float3(0.0, 0.0, 0.0), xgv = xgh;\n";
+  h << "  uint vfb = 0u, vfe = 0u, vbo = 0u, vfl = 0u;\n  float xlod = 0.0;\n  float3 xgh = float3(0.0, 0.0, 0.0), xgv = xgh;\n";
   h << body;
 
   if (!pixel_) {

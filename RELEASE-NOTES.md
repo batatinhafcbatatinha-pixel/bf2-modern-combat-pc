@@ -1,5 +1,11 @@
 Source kit only: no game, no XEX, no generated code and no executable. Bring your own Xbox 360 USA disc.
 
+Renderer update — 2026-10-23:
+
+- Bound vertex fetch results per 32-bit word to the descriptor's buffer range, returning zero outside it. Mini fetches inherit the full fetch's bounds. This fixes the tested first-mission translucent foliage wall without disabling its shader or lowering graphics settings; the user confirmed the visual result.
+- Captured-input replay keeps 7,008 valid positions bit-identical while the 3,500 excess vertices become degenerate. Add 84 game-free WARP bounds cases, including partial elements, mini fetches and legacy negative controls, to the existing shader regression suite. Release build, IEEE arithmetic and 48 position permutations pass.
+- Short gameplay profile: five samples, 35–52 FPS, median 47, with VSync and the limiter off. Camera/scene changes and the short interval prevent a controlled performance claim. Full-game image quality and long-term stability remain unverified.
+
 Renderer update — 2026-10-22:
 
 - Make equivalent position-export dot products accumulate in a stable order and mark position output precise. Captured terrain replay is bit-identical across depth/color variants; the tested first-mission snow pattern is fixed. A separate colored wall above the ground remains unresolved. Add a game-free WARP regression covering 48 translated permutations and a failing legacy cancellation case.
