@@ -7,7 +7,8 @@
 // runs it), right click backward, the wheel steps through the lines.
 //
 // The module owns the final step of every frame: the renderer hands it the guest front buffer
-// (pcs::Picture) and pcs::Present draws it into the swap chain (aspect, FXAA), adds the menu
+// (pcs::Picture) and pcs::Present draws it into the swap chain (aspect, FXAA, and AMD FSR 1.0
+// when the internal resolution is below the window's), adds the menu
 // and the FPS counter, presents with or without vsync and paces the frame rate. Display mode
 // (window / borderless / exclusive fullscreen), monitor, refresh rate, vsync, frame limit,
 // FXAA, anisotropic filtering, aspect and volume apply at once; internal resolution, graphics
@@ -40,11 +41,14 @@ struct Settings {
   int fps = 60;         // frame rate: 60, 30, kFpsMonitor (the display's rate) or 0 (no limit)
   int scale = 0;        // internal resolution preset (restart)
   int aspect = 0;       // 0 original 16:9 with bars, 1 stretched to the window
+  int upscale = 0;      // picture below the window's size: 0 bilinear, 1 AMD FSR 1.0 (EASU + RCAS)
   int aa = 0;           // FXAA
   int aniso = 0;        // 0 = the game's filtering, else 2..16
   int adapter = -1;     // DXGI adapter index; -1 = Windows default (restart)
   int api = 0;          // 0 Direct3D 11, 1 Vulkan through DXVK (vulkan\ next to the exe) (restart)
-  int ui_language = 0;  // this menu: 0 Portuguese, 1 English
+  // This menu: -1 automatic (the game's language, else Windows'), 0 Portuguese, 1 English,
+  // 2 Spanish, 3 French, 4 German, 5 Italian.
+  int ui_language = -1;
   int language = 0;     // game language (XC_LANGUAGE id; 0 = the console default) (restart)
   int volume = 100;
   int show_fps = 0;

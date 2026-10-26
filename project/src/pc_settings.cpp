@@ -82,7 +82,145 @@ bool ReadEffects(uint32_t& mask) {
   return true;
 }
 
-const wchar_t* T(const wchar_t* pt, const wchar_t* en) { return g_opt.ui_language ? en : pt; }
+// ------------------------------------------------------------------- menu languages
+
+// The ini keeps 0 Portuguese and 1 English as before; -1 follows the game's language.
+enum UiLang { kUiPt, kUiEn, kUiEs, kUiFr, kUiDe, kUiIt, kUiNl, kUiRu, kUiLangCount };
+const wchar_t* const k_ui_lang_name[kUiLangCount] = {L"Português", L"English", L"Español", L"Français",
+                                                     L"Deutsch",   L"Italiano", L"Nederlands", L"Русский"};
+
+int UiLangOfGame(int xc_language) {
+  switch (xc_language) {  // XC_LANGUAGE
+    case 1: return kUiEn;
+    case 3: return kUiDe;
+    case 4: return kUiFr;
+    case 5: return kUiEs;
+    case 6: return kUiIt;
+    case 9: return kUiPt;
+    case 12: return kUiRu;
+  }
+  return -1;
+}
+
+int UiLangOfWindows() {
+  switch (PRIMARYLANGID(GetUserDefaultUILanguage())) {
+    case LANG_PORTUGUESE: return kUiPt;
+    case LANG_SPANISH: return kUiEs;
+    case LANG_FRENCH: return kUiFr;
+    case LANG_GERMAN: return kUiDe;
+    case LANG_ITALIAN: return kUiIt;
+    case LANG_DUTCH: return kUiNl;
+    case LANG_RUSSIAN: return kUiRu;
+  }
+  return kUiEn;
+}
+
+int UiLangAuto() {
+  int l = UiLangOfGame(g_opt.language);
+  return l >= 0 ? l : UiLangOfWindows();
+}
+
+int UiLang() { return g_opt.ui_language >= 0 ? g_opt.ui_language : UiLangAuto(); }
+
+// The other languages, found by the English text (format specifiers kept).
+struct Translation {
+  const wchar_t* en;
+  const wchar_t* other[kUiLangCount - kUiEs];  // es, fr, de, it, nl, ru
+};
+const Translation k_tr[] = {
+    {L"Monitor", {L"Monitor", L"Moniteur", L"Monitor", L"Monitor", L"Monitor", L"Монитор"}},
+    {L"Volume", {L"Volumen", L"Volume", L"Lautstärke", L"Volume", L"Volume", L"Громкость"}},
+    {L"Console default", {L"Predeterminado de la consola", L"Langue de la console", L"Konsolenstandard", L"Predefinita della console", L"Standaard van de console", L"По умолчанию консоли"}},
+    {L"On", {L"Activado", L"Activé", L"An", L"Attivo", L"Aan", L"Вкл."}},
+    {L"Off", {L"Desactivado", L"Désactivé", L"Aus", L"Disattivato", L"Uit", L"Выкл."}},
+    {L"Display mode", {L"Modo de pantalla", L"Mode d'affichage", L"Anzeigemodus", L"Modalità schermo", L"Weergavemodus", L"Режим экрана"}},
+    {L"Windowed", {L"Ventana", L"Fenêtré", L"Fenster", L"Finestra", L"Venster", L"Оконный"}},
+    {L"Borderless fullscreen", {L"Pantalla completa sin bordes", L"Plein écran sans bordure", L"Randloses Vollbild", L"Schermo intero senza bordi", L"Randloos volledig scherm", L"Полноэкранный без рамки"}},
+    {L"Exclusive fullscreen (when focused)", {L"Pantalla completa exclusiva (al enfocar la ventana)", L"Plein écran exclusif (quand la fenêtre est active)", L"Exklusives Vollbild (wenn das Fenster aktiv ist)", L"Schermo intero esclusivo (con la finestra attiva)", L"Exclusief volledig scherm (als het venster actief is)", L"Эксклюзивный полноэкранный (при активном окне)"}},
+    {L"Exclusive unavailable: borderless", {L"Exclusiva no disponible: sin bordes", L"Exclusif indisponible : sans bordure", L"Exklusiv nicht verfügbar: randlos", L"Esclusivo non disponibile: senza bordi", L"Exclusief niet beschikbaar: randloos", L"Эксклюзивный недоступен: без рамки"}},
+    {L"Exclusive fullscreen", {L"Pantalla completa exclusiva", L"Plein écran exclusif", L"Exklusives Vollbild", L"Schermo intero esclusivo", L"Exclusief volledig scherm", L"Эксклюзивный полноэкранный"}},
+    {L"Refresh rate", {L"Frecuencia de actualización", L"Fréquence de rafraîchissement", L"Bildwiederholrate", L"Frequenza di aggiornamento", L"Verversingssnelheid", L"Частота обновления"}},
+    {L"Monitor refresh rate (%d Hz)", {L"La del monitor (%d Hz)", L"Celle du moniteur (%d Hz)", L"Die des Monitors (%d Hz)", L"Quella del monitor (%d Hz)", L"Die van de monitor (%d Hz)", L"Как у монитора (%d Гц)"}},
+    {L"Vertical sync (VSync)", {L"Sincronización vertical (VSync)", L"Synchronisation verticale (VSync)", L"Vertikale Synchronisation (VSync)", L"Sincronizzazione verticale (VSync)", L"Verticale synchronisatie (VSync)", L"Вертикальная синхронизация (VSync)"}},
+    {L"Frame limit", {L"Límite de fotogramas", L"Limite d'images", L"Bildratenbegrenzung", L"Limite di fotogrammi", L"Beeldlimiet", L"Ограничение кадров"}},
+    {L"Monitor rate (%d fps)", {L"La del monitor (%d fps)", L"Celle du moniteur (%d fps)", L"Die des Monitors (%d fps)", L"Quella del monitor (%d fps)", L"Die van de monitor (%d fps)", L"Как у монитора (%d к/с)"}},
+    {L"Unlimited", {L"Sin límite", L"Illimité", L"Unbegrenzt", L"Illimitato", L"Onbeperkt", L"Без ограничения"}},
+    {L"Internal resolution", {L"Resolución interna", L"Résolution interne", L"Interne Auflösung", L"Risoluzione interna", L"Interne resolutie", L"Внутреннее разрешение"}},
+    {L"Monitor resolution", {L"Resolución del monitor", L"Résolution du moniteur", L"Monitorauflösung", L"Risoluzione del monitor", L"Monitorresolutie", L"Разрешение монитора"}},
+    {L"Upscaling", {L"Escalado", L"Mise à l'échelle", L"Hochskalierung", L"Upscaling", L"Opschaling", L"Масштабирование"}},
+    {L"Aspect ratio", {L"Relación de aspecto", L"Format d'image", L"Seitenverhältnis", L"Proporzioni", L"Beeldverhouding", L"Соотношение сторон"}},
+    {L"Stretch to the screen", {L"Estirar a la pantalla", L"Étirer à l'écran", L"Auf den Bildschirm strecken", L"Allarga allo schermo", L"Uitrekken tot het scherm", L"Растянуть на экран"}},
+    {L"16:9 (original, with bars)", {L"16:9 (original, con barras)", L"16:9 (original, avec bandes)", L"16:9 (original, mit Balken)", L"16:9 (originale, con bande)", L"16:9 (origineel, met balken)", L"16:9 (оригинал, с полосами)"}},
+    {L"Anti-aliasing", {L"Antialiasing", L"Anticrénelage", L"Kantenglättung", L"Antialiasing", L"Anti-aliasing", L"Сглаживание"}},
+    {L"Anisotropic filtering", {L"Filtrado anisotrópico", L"Filtrage anisotrope", L"Anisotrope Filterung", L"Filtro anisotropico", L"Anisotrope filtering", L"Анизотропная фильтрация"}},
+    {L"Game default", {L"El del juego", L"Celui du jeu", L"Wie im Spiel", L"Quello del gioco", L"Zoals in het spel", L"Как в игре"}},
+    {L"Graphics API", {L"API gráfica", L"API graphique", L"Grafik-API", L"API grafica", L"Grafische API", L"Графический API"}},
+    {L"Graphics card", {L"Tarjeta gráfica", L"Carte graphique", L"Grafikkarte", L"Scheda video", L"Videokaart", L"Видеокарта"}},
+    {L"Automatic (Windows default)", {L"Automática (predeterminada de Windows)", L"Automatique (par défaut de Windows)", L"Automatisch (Windows-Standard)", L"Automatica (predefinita di Windows)", L"Automatisch (standaard van Windows)", L"Автоматически (по умолчанию Windows)"}},
+    {L"Show FPS", {L"Mostrar FPS", L"Afficher les FPS", L"FPS anzeigen", L"Mostra FPS", L"FPS tonen", L"Показывать FPS"}},
+    {L"Yes", {L"Sí", L"Oui", L"Ja", L"Sì", L"Ja", L"Да"}},
+    {L"No", {L"No", L"Non", L"Nein", L"No", L"Nee", L"Нет"}},
+    {L"Menu language", {L"Idioma del menú", L"Langue du menu", L"Menüsprache", L"Lingua del menu", L"Menutaal", L"Язык меню"}},
+    {L"Automatic (%ls)", {L"Automático (%ls)", L"Automatique (%ls)", L"Automatisch (%ls)", L"Automatica (%ls)", L"Automatisch (%ls)", L"Автоматически (%ls)"}},
+    {L"Game language", {L"Idioma del juego", L"Langue du jeu", L"Spielsprache", L"Lingua del gioco", L"Speltaal", L"Язык игры"}},
+    {L"Back to the game", {L"Volver al juego", L"Retour au jeu", L"Zurück zum Spiel", L"Torna al gioco", L"Terug naar het spel", L"Вернуться в игру"}},
+    {L"Restart game to apply *", {L"Reiniciar el juego para aplicar *", L"Redémarrer le jeu pour appliquer *", L"Spiel neu starten, um anzuwenden *", L"Riavvia il gioco per applicare *", L"Spel herstarten om toe te passen *", L"Перезапустить игру для применения *"}},
+    {L"Quit game", {L"Salir del juego", L"Quitter le jeu", L"Spiel beenden", L"Esci dal gioco", L"Spel afsluiten", L"Выйти из игры"}},
+    {L"Windowed, borderless fullscreen (quick Alt+Tab) or exclusive fullscreen.", {L"Ventana, pantalla completa sin bordes (Alt+Tab rápido) o pantalla completa exclusiva.", L"Fenêtré, plein écran sans bordure (Alt+Tab rapide) ou plein écran exclusif.", L"Fenster, randloses Vollbild (schnelles Alt+Tab) oder exklusives Vollbild.", L"Finestra, schermo intero senza bordi (Alt+Tab rapido) o schermo intero esclusivo.", L"Venster, randloos volledig scherm (snel Alt+Tab) of exclusief volledig scherm.", L"Окно, полноэкранный без рамки (быстрый Alt+Tab) или эксклюзивный полноэкранный режим."}},
+    {L"Monitor used to display the game.", {L"Monitor en el que se muestra el juego.", L"Moniteur utilisé pour afficher le jeu.", L"Monitor, auf dem das Spiel angezeigt wird.", L"Monitor su cui viene mostrato il gioco.", L"Monitor waarop het spel wordt getoond.", L"Монитор, на котором показывается игра."}},
+    {L"Monitor refresh rate in exclusive fullscreen.", {L"Frecuencia del monitor en pantalla completa exclusiva.", L"Fréquence du moniteur en plein écran exclusif.", L"Bildwiederholrate des Monitors im exklusiven Vollbild.", L"Frequenza del monitor a schermo intero esclusivo.", L"Verversingssnelheid van de monitor in exclusief volledig scherm.", L"Частота монитора в эксклюзивном полноэкранном режиме."}},
+    {L"Synchronizes frames with the monitor to prevent tearing, with slightly more latency.", {L"Sincroniza los fotogramas con el monitor para evitar cortes en la imagen, con algo más de latencia.", L"Synchronise les images avec le moniteur pour éviter le déchirement, avec un peu plus de latence.", L"Synchronisiert die Bilder mit dem Monitor gegen Tearing, mit etwas mehr Latenz.", L"Sincronizza i fotogrammi con il monitor per evitare il tearing, con un po' più di latenza.", L"Synchroniseert de beelden met de monitor tegen tearing, met iets meer vertraging.", L"Синхронизирует кадры с монитором, чтобы не было разрывов, с чуть большей задержкой."}},
+    {L"60 as on the console, the monitor's rate (smoother on 120/144 Hz screens) or no limit. 30 saves power.", {L"60 como en la consola, la del monitor (más fluido en pantallas de 120/144 Hz) o sin límite. 30 ahorra energía.", L"60 comme sur la console, celle du moniteur (plus fluide sur les écrans 120/144 Hz) ou illimité. 30 économise l'énergie.", L"60 wie auf der Konsole, die des Monitors (flüssiger auf 120/144-Hz-Bildschirmen) oder unbegrenzt. 30 spart Energie.", L"60 come su console, quella del monitor (più fluido su schermi a 120/144 Hz) o senza limite. 30 risparmia energia.", L"60 zoals op de console, die van de monitor (vloeiender op 120/144 Hz-schermen) of onbeperkt. 30 bespaart energie.", L"60 как на консоли, частота монитора (плавнее на экранах 120/144 Гц) или без ограничения. 30 экономит энергию."}},
+    {L"This game advances one step per frame: above 60 it would run too fast. 30 saves power on laptops.", {L"Este juego avanza un paso por fotograma: por encima de 60 iría demasiado rápido. 30 ahorra energía en portátiles.", L"Ce jeu avance d'un pas par image : au-delà de 60, il irait trop vite. 30 économise l'énergie sur les portables.", L"Dieses Spiel rechnet einen Schritt pro Bild: über 60 liefe es zu schnell. 30 spart Energie auf Laptops.", L"Questo gioco avanza di un passo per fotogramma: oltre 60 andrebbe troppo veloce. 30 risparmia energia sui portatili.", L"Dit spel rekent één stap per beeld: boven 60 zou het te snel lopen. 30 bespaart energie op laptops.", L"Игра делает один шаг за кадр: выше 60 она шла бы слишком быстро. 30 экономит энергию на ноутбуках."}},
+    {L"Higher rendering resolutions give a sharper image and increase GPU load.", {L"Resoluciones más altas dan una imagen más nítida y exigen más a la tarjeta gráfica.", L"Une résolution plus élevée donne une image plus nette et sollicite davantage la carte graphique.", L"Höhere Auflösungen ergeben ein schärferes Bild und belasten die Grafikkarte stärker.", L"Risoluzioni più alte danno un'immagine più nitida e impegnano di più la scheda video.", L"Een hogere resolutie geeft een scherper beeld en belast de videokaart meer.", L"Более высокое разрешение даёт более чёткое изображение и сильнее нагружает видеокарту."}},
+    {L"How the picture is enlarged when the internal resolution is below the screen's. AMD FSR 1.0 rebuilds edges and sharpens.", {L"Cómo se amplía la imagen cuando la resolución interna es menor que la de la pantalla. AMD FSR 1.0 reconstruye los bordes y aumenta la nitidez.", L"Façon d'agrandir l'image quand la résolution interne est inférieure à celle de l'écran. AMD FSR 1.0 reconstruit les contours et accentue la netteté.", L"Wie das Bild vergrößert wird, wenn die interne Auflösung unter der des Bildschirms liegt. AMD FSR 1.0 rekonstruiert Kanten und schärft nach.", L"Come viene ingrandita l'immagine quando la risoluzione interna è inferiore a quella dello schermo. AMD FSR 1.0 ricostruisce i bordi e aumenta la nitidezza.", L"Hoe het beeld wordt vergroot als de interne resolutie lager is dan die van het scherm. AMD FSR 1.0 herstelt randen en verscherpt.", L"Как увеличивается изображение, когда внутреннее разрешение ниже экранного. AMD FSR 1.0 восстанавливает края и повышает резкость."}},
+    {L"The game is 16:9. On other screen shapes: with bars or stretched.", {L"El juego es 16:9. En pantallas de otro formato: con barras o estirado.", L"Le jeu est en 16:9. Sur d'autres formats d'écran : avec bandes ou étiré.", L"Das Spiel ist 16:9. Auf anderen Bildschirmformaten: mit Balken oder gestreckt.", L"Il gioco è in 16:9. Su schermi di altro formato: con bande o allargato.", L"Het spel is 16:9. Op schermen met een andere vorm: met balken of uitgerekt.", L"Игра в формате 16:9. На экранах другой формы: с полосами или растянуто."}},
+    {L"FXAA smooths jagged edges with minimal performance cost.", {L"FXAA suaviza los bordes dentados con un coste mínimo.", L"Le FXAA adoucit les bords crénelés pour un coût minime.", L"FXAA glättet gezackte Kanten bei minimalem Leistungsbedarf.", L"FXAA ammorbidisce i bordi seghettati con un costo minimo.", L"FXAA maakt gekartelde randen glad tegen minimale kosten.", L"FXAA сглаживает зубчатые края почти без потерь производительности."}},
+    {L"Sharpens textures viewed at an angle, such as the ground.", {L"Hace nítidas las texturas vistas en ángulo, como el suelo.", L"Rend nettes les textures vues en biais, comme le sol.", L"Schärft schräg betrachtete Texturen, etwa den Boden.", L"Rende nitide le texture viste di sbieco, come il terreno.", L"Maakt schuin bekeken texturen scherp, zoals de grond.", L"Делает чёткими текстуры под углом, например землю."}},
+    {L"Direct3D 11. Vulkan needs the vulkan folder (DXVK) next to the game.", {L"Direct3D 11. Vulkan necesita la carpeta vulkan (DXVK) junto al juego.", L"Direct3D 11. Vulkan nécessite le dossier vulkan (DXVK) à côté du jeu.", L"Direct3D 11. Vulkan braucht den Ordner vulkan (DXVK) neben dem Spiel.", L"Direct3D 11. Vulkan richiede la cartella vulkan (DXVK) accanto al gioco.", L"Direct3D 11. Vulkan heeft de map vulkan (DXVK) naast het spel nodig.", L"Direct3D 11. Для Vulkan нужна папка vulkan (DXVK) рядом с игрой."}},
+    {L"DirectX 11 or Vulkan (through DXVK). If something looks wrong or stutters, try the other one. Restarts the game.", {L"DirectX 11 o Vulkan (mediante DXVK). Si algo se ve mal o da tirones, prueba la otra. Reinicia el juego.", L"DirectX 11 ou Vulkan (via DXVK). Si quelque chose s'affiche mal ou saccade, essayez l'autre. Redémarre le jeu.", L"DirectX 11 oder Vulkan (über DXVK). Wenn etwas falsch aussieht oder ruckelt, probiere die andere. Startet das Spiel neu.", L"DirectX 11 o Vulkan (tramite DXVK). Se qualcosa appare sbagliato o scatta, prova l'altra. Riavvia il gioco.", L"DirectX 11 of Vulkan (via DXVK). Als iets er verkeerd uitziet of hapert, probeer de andere. Herstart het spel.", L"DirectX 11 или Vulkan (через DXVK). Если что-то выглядит неправильно или подтормаживает, попробуйте другой. Перезапускает игру."}},
+    {L"Graphics card used to render the game.", {L"Tarjeta gráfica que dibuja el juego.", L"Carte graphique qui affiche le jeu.", L"Grafikkarte, die das Spiel darstellt.", L"Scheda video che disegna il gioco.", L"Videokaart die het spel tekent.", L"Видеокарта, которая отрисовывает игру."}},
+    {L"Shows frames per second in the corner of the screen.", {L"Muestra los fotogramas por segundo en la esquina de la pantalla.", L"Affiche les images par seconde dans le coin de l'écran.", L"Zeigt die Bilder pro Sekunde in der Bildschirmecke.", L"Mostra i fotogrammi al secondo nell'angolo dello schermo.", L"Toont de beelden per seconde in de hoek van het scherm.", L"Показывает кадры в секунду в углу экрана."}},
+    {L"Language of this settings menu. Automatic follows the game's language. Changes apply immediately.", {L"Idioma de este menú. Automático sigue el idioma del juego. El cambio es inmediato.", L"Langue de ce menu. Automatique suit la langue du jeu. Le changement est immédiat.", L"Sprache dieses Menüs. Automatisch folgt der Spielsprache. Die Änderung gilt sofort.", L"Lingua di questo menu. Automatica segue la lingua del gioco. La modifica è immediata.", L"Taal van dit menu. Automatisch volgt de taal van het spel. De wijziging geldt meteen.", L"Язык этого меню. «Автоматически» следует языку игры. Изменение применяется сразу."}},
+    {L"Language of the game's text and commentary (as available on the disc).", {L"Idioma de los textos y la narración del juego (lo que tenga el disco).", L"Langue des textes et des commentaires du jeu (selon le disque).", L"Sprache der Texte und des Kommentars im Spiel (je nach Disc).", L"Lingua dei testi e della telecronaca del gioco (secondo il disco).", L"Taal van de teksten en het commentaar van het spel (zoals op de disc).", L"Язык текста и комментариев игры (что есть на диске)."}},
+    {L"Overall game volume.", {L"Volumen general del juego.", L"Volume général du jeu.", L"Gesamtlautstärke des Spiels.", L"Volume generale del gioco.", L"Algemeen volume van het spel.", L"Общая громкость игры."}},
+    {L"Saves settings and returns to the game.", {L"Guarda los ajustes y vuelve al juego.", L"Enregistre les réglages et revient au jeu.", L"Speichert die Einstellungen und kehrt zum Spiel zurück.", L"Salva le impostazioni e torna al gioco.", L"Slaat de instellingen op en keert terug naar het spel.", L"Сохраняет настройки и возвращает в игру."}},
+    {L"Restarts the game to apply settings marked with *.", {L"Reinicia el juego para aplicar las opciones marcadas con *.", L"Redémarre le jeu pour appliquer les options marquées d'un *.", L"Startet das Spiel neu, um die mit * markierten Optionen anzuwenden.", L"Riavvia il gioco per applicare le opzioni contrassegnate con *.", L"Herstart het spel om de met * gemarkeerde opties toe te passen.", L"Перезапускает игру, чтобы применить параметры, отмеченные *."}},
+    {L"Saves settings and quits the game.", {L"Guarda los ajustes y cierra el juego.", L"Enregistre les réglages et quitte le jeu.", L"Speichert die Einstellungen und beendet das Spiel.", L"Salva le impostazioni ed esce dal gioco.", L"Slaat de instellingen op en sluit het spel af.", L"Сохраняет настройки и закрывает игру."}},
+    {L"PC SETTINGS", {L"AJUSTES DE PC", L"PARAMÈTRES PC", L"PC-EINSTELLUNGEN", L"IMPOSTAZIONI PC", L"PC-INSTELLINGEN", L"НАСТРОЙКИ ПК"}},
+    {L"* APPLIES AFTER RESTARTING", {L"* SE APLICA AL REINICIAR", L"* S'APPLIQUE AU REDÉMARRAGE", L"* GILT NACH DEM NEUSTART", L"* SI APPLICA AL RIAVVIO", L"* GELDT NA HERSTARTEN", L"* ПРИМЕНЯЕТСЯ ПОСЛЕ ПЕРЕЗАПУСКА"}},
+    {L"SELECT", {L"SELECCIONAR", L"SÉLECTIONNER", L"AUSWÄHLEN", L"SELEZIONA", L"SELECTEREN", L"ВЫБРАТЬ"}},
+    {L"BACK", {L"VOLVER", L"RETOUR", L"ZURÜCK", L"INDIETRO", L"TERUG", L"НАЗАД"}},
+    {L"ENTER / CLICK: SELECT   ESC / F1: BACK", {L"ENTER / CLIC: SELECCIONAR   ESC / F1: VOLVER", L"ENTRÉE / CLIC : SÉLECTIONNER   ÉCHAP / F1 : RETOUR", L"ENTER / KLICK: AUSWÄHLEN   ESC / F1: ZURÜCK", L"INVIO / CLIC: SELEZIONA   ESC / F1: INDIETRO", L"ENTER / KLIK: SELECTEREN   ESC / F1: TERUG", L"ENTER / ЩЕЛЧОК: ВЫБРАТЬ   ESC / F1: НАЗАД"}},
+    {L"settings", {L"ajustes", L"paramètres", L"Einstellungen", L"impostazioni", L"instellingen", L"настройки"}},
+    {L"%ls  •  PC  •  video, display and system  •  game paused", {L"%ls  •  PC  •  vídeo, pantalla y sistema  •  juego en pausa", L"%ls  •  PC  •  vidéo, affichage et système  •  jeu en pause", L"%ls  •  PC  •  Video, Anzeige und System  •  Spiel pausiert", L"%ls  •  PC  •  video, schermo e sistema  •  gioco in pausa", L"%ls  •  PC  •  video, scherm en systeem  •  spel gepauzeerd", L"%ls  •  ПК  •  видео, экран и система  •  игра на паузе"}},
+    {L"VIDEO", {L"VÍDEO", L"VIDÉO", L"VIDEO", L"VIDEO", L"VIDEO", L"ВИДЕО"}},
+    {L"SYSTEM", {L"SISTEMA", L"SYSTÈME", L"SYSTEM", L"SISTEMA", L"SYSTEEM", L"СИСТЕМА"}},
+    {L"* applies after restarting", {L"* se aplica al reiniciar", L"* s'applique au redémarrage", L"* gilt nach dem Neustart", L"* si applica al riavvio", L"* geldt na herstarten", L"* применяется после перезапуска"}},
+    {L"SELECT (Enter / click)", {L"SELECCIONAR (Enter / clic)", L"SÉLECTIONNER (Entrée / clic)", L"AUSWÄHLEN (Enter / Klick)", L"SELEZIONA (Invio / clic)", L"SELECTEREN (Enter / klik)", L"ВЫБРАТЬ (Enter / щелчок)"}},
+    {L"BACK (Esc / F1)", {L"VOLVER (Esc / F1)", L"RETOUR (Échap / F1)", L"ZURÜCK (Esc / F1)", L"INDIETRO (Esc / F1)", L"TERUG (Esc / F1)", L"НАЗАД (Esc / F1)"}},
+    {L"◀ ▶  change (right click goes back)      Alt+Enter  fullscreen", {L"◀ ▶  cambiar (el botón derecho retrocede)      Alt+Enter  pantalla completa", L"◀ ▶  modifier (clic droit pour revenir)      Alt+Entrée  plein écran", L"◀ ▶  ändern (Rechtsklick geht zurück)      Alt+Enter  Vollbild", L"◀ ▶  cambia (il tasto destro torna indietro)      Alt+Invio  schermo intero", L"◀ ▶  wijzigen (rechtsklik gaat terug)      Alt+Enter  volledig scherm", L"◀ ▶  изменить (правый щелчок — назад)      Alt+Enter  полный экран"}},
+    // Effects of the games (pc_game_info.h).
+    {L"Vignette", {L"Viñeta", L"Vignettage", L"Vignette", L"Vignettatura", L"Vignettering", L"Виньетка"}},
+    {L"Darkening around the edges of the image.", {L"Oscurecimiento de los bordes de la imagen.", L"Assombrissement des bords de l'image.", L"Abdunkelung der Bildränder.", L"Scurimento dei bordi dell'immagine.", L"Donkere randen rond het beeld.", L"Затемнение по краям изображения."}},
+    {L"Cinematic brightness and contrast", {L"Brillo y contraste cinematográficos", L"Luminosité et contraste cinématographiques", L"Kinoreife Helligkeit und Kontrast", L"Luminosità e contrasto cinematografici", L"Filmische helderheid en contrast", L"Кинематографичные яркость и контраст"}},
+    {L"The game's final brightness and contrast adjustment.", {L"El ajuste final de brillo y contraste del juego.", L"Le réglage final de luminosité et de contraste du jeu.", L"Die abschließende Helligkeits- und Kontrastanpassung des Spiels.", L"La regolazione finale di luminosità e contrasto del gioco.", L"De laatste aanpassing van helderheid en contrast door het spel.", L"Финальная настройка яркости и контраста в игре."}},
+    {L"Bloom", {L"Resplandor (bloom)", L"Flou lumineux (bloom)", L"Bloom", L"Bloom", L"Bloom", L"Свечение (bloom)"}},
+    {L"Glow around bright lights and surfaces.", {L"Brillo alrededor de luces y superficies claras.", L"Halo autour des lumières et des surfaces claires.", L"Leuchten um helle Lichter und Flächen.", L"Alone attorno a luci e superfici chiare.", L"Gloed rond felle lichten en oppervlakken.", L"Ореол вокруг ярких огней и поверхностей."}},
+    {L"Motion blur", {L"Desenfoque de movimiento", L"Flou de mouvement", L"Bewegungsunschärfe", L"Sfocatura di movimento", L"Bewegingsonscherpte", L"Размытие в движении"}},
+    {L"Blur on fast movement of the camera or objects.", {L"Desenfoque en los movimientos rápidos de la cámara o los objetos.", L"Flou lors des mouvements rapides de la caméra ou des objets.", L"Unschärfe bei schnellen Kamera- oder Objektbewegungen.", L"Sfocatura nei movimenti rapidi della telecamera o degli oggetti.", L"Onscherpte bij snelle bewegingen van de camera of objecten.", L"Размытие при быстром движении камеры или объектов."}},
+    {L"Depth of field", {L"Profundidad de campo", L"Profondeur de champ", L"Tiefenschärfe", L"Profondità di campo", L"Scherptediepte", L"Глубина резкости"}},
+    {L"Background blur that focuses the view.", {L"Desenfoque del fondo que centra la vista.", L"Flou de l'arrière-plan qui concentre le regard.", L"Hintergrundunschärfe, die den Blick lenkt.", L"Sfocatura dello sfondo che concentra lo sguardo.", L"Onscherpe achtergrond die de blik richt.", L"Размытие фона, которое фокусирует взгляд."}},
+};
+
+const wchar_t* T(const wchar_t* pt, const wchar_t* en) {
+  int l = UiLang();
+  if (l == kUiPt) return pt;
+  if (l == kUiEn) return en;
+  for (const Translation& t : k_tr)
+    if (std::wcscmp(t.en, en) == 0) return t.other[l - kUiEs];
+  return en;
+}
 
 // Internal resolution presets: lines drawn (the games render 720); 0 = the monitor's.
 struct ResPreset { int h; const wchar_t* pt; const wchar_t* en; };
@@ -93,10 +231,13 @@ const ResPreset k_res[] = {
     {2160, L"2160p (4K)", L"2160p (4K)"},
     {0, L"Resolução do monitor", L"Monitor resolution"},
     {4320, L"4320p (8K)", L"4320p (8K)"},
+    // Below the original, for slower cards: the window keeps its size and FSR can enlarge.
+    {540, L"540p", L"540p"},
+    {360, L"360p", L"360p"},
 };
 constexpr int kNumRes = int(sizeof(k_res) / sizeof(k_res[0]));
-// Menu order (the ini keeps the index above: 8K came later, after "monitor").
-const int k_res_order[] = {0, 1, 2, 3, 5, 4};
+// Menu order (the ini keeps the index above: later presets were appended).
+const int k_res_order[] = {7, 6, 0, 1, 2, 3, 5, 4};
 const int k_fps[] = {60, kFpsMonitor, 0, 30};
 const int k_fps_fixed[] = {60, 30};
 const int k_aniso[] = {0, 2, 4, 8, 16};
@@ -123,6 +264,7 @@ void SaveIni() {
   IniPut(L"limite_fps", g_opt.fps);
   IniPut(L"resolucao", g_opt.scale);
   IniPut(L"proporcao", g_opt.aspect);
+  IniPut(L"ampliacao", g_opt.upscale);
   IniPut(L"fxaa", g_opt.aa);
   IniPut(L"anisotropico", g_opt.aniso);
   IniPut(L"gpu", g_opt.adapter);
@@ -323,10 +465,19 @@ void InternalSize(int scale, uint32_t& w, uint32_t& h) {
   w = (uint32_t(float(lines) * float(g_info.native_width) / float(g_info.native_height) + 0.5f) + 1) & ~1u;
 }
 
+// The window in windowed mode: the internal size, but never below the original.
+void WindowSize(int scale, uint32_t& w, uint32_t& h) {
+  InternalSize(scale, w, h);
+  if (h < uint32_t(g_info.native_height)) {
+    w = uint32_t(g_info.native_width);
+    h = uint32_t(g_info.native_height);
+  }
+}
+
 // ----------------------------------------------------------------------- menu state
 
 enum Item {
-  IT_DISPLAY, IT_MONITOR, IT_REFRESH, IT_VSYNC, IT_FPS, IT_SCALE, IT_ASPECT, IT_AA, IT_ANISO,
+  IT_DISPLAY, IT_MONITOR, IT_REFRESH, IT_VSYNC, IT_FPS, IT_SCALE, IT_UPSCALE, IT_ASPECT, IT_AA, IT_ANISO,
   IT_EFFECT0, IT_EFFECT_END = IT_EFFECT0 + kMaxEffects,
   IT_API = IT_EFFECT_END, IT_GPU, IT_SHOW_FPS, IT_UI_LANG, IT_LANG, IT_VOLUME, IT_RESUME, IT_RESTART, IT_QUIT,
   IT_COUNT
@@ -382,7 +533,7 @@ bool ItemRestart(int it) {
 bool ItemVisible(int it) {
   if (it >= IT_EFFECT0 && it < IT_EFFECT_END) return it - IT_EFFECT0 < g_info.effect_count;
   switch (it) {
-    case IT_SCALE: return g_info.internal_resolution;
+    case IT_SCALE: case IT_UPSCALE: return g_info.internal_resolution;
     case IT_LANG: return g_info.language_count > 1;
     case IT_RESTART: return RestartPending();
   }
@@ -429,6 +580,7 @@ void Change(int it, int d) {
       g_display_hz_at = 0;
       break;
     case IT_SCALE: g_opt.scale = Cycle(k_res_order, kNumRes, g_opt.scale, d); break;
+    case IT_UPSCALE: g_opt.upscale = !g_opt.upscale; break;
     case IT_ASPECT: g_opt.aspect = !g_opt.aspect; break;
     case IT_AA: g_opt.aa = !g_opt.aa; break;
     case IT_ANISO: g_opt.aniso = Cycle(k_aniso, 5, g_opt.aniso, d); break;
@@ -444,7 +596,7 @@ void Change(int it, int d) {
       break;
     }
     case IT_SHOW_FPS: g_opt.show_fps = !g_opt.show_fps; break;
-    case IT_UI_LANG: g_opt.ui_language = !g_opt.ui_language; break;
+    case IT_UI_LANG: g_opt.ui_language = (g_opt.ui_language + 1 + kUiLangCount + 1 + d) % (kUiLangCount + 1) - 1; break;
     case IT_LANG:
       list.push_back(0);
       for (int i = 0; i < g_info.language_count; ++i) list.push_back(g_info.languages[i].id);
@@ -686,7 +838,7 @@ void ApplyWindowMode(int display, int monitor_index) {
   if (display == 0) {
     if (g_window->IsFullscreen()) g_window->SetFullscreen(false);
     uint32_t w, h;
-    InternalSize(g_opt.scale, w, h);
+    WindowSize(g_opt.scale, w, h);
     int aw = int(m.work.right - m.work.left) * 9 / 10, ah = int(m.work.bottom - m.work.top) * 9 / 10;
     int ww = int(w), wh = int(h);
     if (ww > aw) { wh = wh * aw / ww; ww = aw; }
@@ -791,6 +943,8 @@ struct Gpu {
   ID3D11PixelShader* ps_pic = nullptr;
   ID3D11PixelShader* ps_fxaa = nullptr;
   ID3D11PixelShader* ps_overlay = nullptr;
+  ID3D11PixelShader* ps_easu = nullptr;
+  ID3D11PixelShader* ps_rcas = nullptr;
   ID3D11BlendState* blend_alpha = nullptr;
   ID3D11SamplerState* linear = nullptr;
   ID3D11SamplerState* point = nullptr;
@@ -824,7 +978,51 @@ const char k_shaders[] =
     "float3 b=a*0.5+0.25*(S(uv-d*0.5)+S(uv+d*0.5));"
     "float lb=dot(b,L);"
     "return float4((lb<lmin||lb>lmax)?a:b,1);}"
-    "float4 ps_overlay(V i):SV_Target{return pic.SampleLevel(lin,i.uv,0);}";
+    "float4 ps_overlay(V i):SV_Target{return pic.SampleLevel(lin,i.uv,0);}"
+    // AMD FidelityFX Super Resolution 1.0 (MIT; Copyright (c) 2021 Advanced Micro Devices),
+    // the 32-bit path of ffx_fsr1.h. EASU: uvmax.xy source size, uvmax.zw output size.
+    "float Lu(float3 c){return c.b*0.5+(c.r*0.5+c.g);}"
+    "float3 Ld(int2 p,float2 n){return pic.Load(int3(clamp(p,int2(0,0),int2(n)-1),0)).rgb;}"
+    "void Es(inout float2 dir,inout float len,float w,float a,float b,float c,float d,float e){"
+    "float lx=max(abs(d-c),abs(c-b)); lx=lx>0?1/lx:0; float dx=d-b; dir.x+=dx*w;"
+    "lx=saturate(abs(dx)*lx); len+=lx*lx*w;"
+    "float ly=max(abs(e-c),abs(c-a)); ly=ly>0?1/ly:0; float dy=e-a; dir.y+=dy*w;"
+    "ly=saturate(abs(dy)*ly); len+=ly*ly*w;}"
+    "void Et(inout float3 ac,inout float aw,float2 o,float2 dir,float2 len2,float lob,float clp,float3 c){"
+    "float2 v=float2(o.x*dir.x+o.y*dir.y,o.x*(-dir.y)+o.y*dir.x)*len2; float d2=min(dot(v,v),clp);"
+    "float wb=0.4*d2-1,wa=lob*d2-1; wb*=wb; wa*=wa; wb=1.5625*wb-0.5625; float w=wb*wa; ac+=c*w; aw+=w;}"
+    "float4 ps_easu(V i):SV_Target{float2 n=uvmax.xy;"
+    "float2 pp=(floor(i.p.xy)+0.5)*n/uvmax.zw-0.5; float2 fp=floor(pp); pp-=fp; int2 q=int2(fp);"
+    "float3 b=Ld(q+int2(0,-1),n),c=Ld(q+int2(1,-1),n),e=Ld(q+int2(-1,0),n),f=Ld(q,n),"
+    "g=Ld(q+int2(1,0),n),h=Ld(q+int2(2,0),n),k0=Ld(q+int2(-1,1),n),j=Ld(q+int2(0,1),n),"
+    "k=Ld(q+int2(1,1),n),l=Ld(q+int2(2,1),n),m=Ld(q+int2(0,2),n),o=Ld(q+int2(1,2),n);"
+    "float bL=Lu(b),cL=Lu(c),eL=Lu(e),fL=Lu(f),gL=Lu(g),hL=Lu(h),iL=Lu(k0),jL=Lu(j),kL=Lu(k),lL=Lu(l),"
+    "nL=Lu(m),oL=Lu(o); float2 dir=0; float len=0;"
+    "Es(dir,len,(1-pp.x)*(1-pp.y),bL,eL,fL,gL,jL); Es(dir,len,pp.x*(1-pp.y),cL,fL,gL,hL,kL);"
+    "Es(dir,len,(1-pp.x)*pp.y,fL,iL,jL,kL,nL); Es(dir,len,pp.x*pp.y,gL,jL,kL,lL,oL);"
+    "float dr=dot(dir,dir); bool z=dr<1.0/32768.0; dr=z?1:rsqrt(dr); dir.x=z?1:dir.x; dir*=dr;"
+    "len=len*0.5; len*=len; float st=dot(dir,dir)/max(abs(dir.x),abs(dir.y));"
+    "float2 len2=float2(1+(st-1)*len,1-0.5*len); float lob=0.5+((1.0/4.0-0.04)-0.5)*len; float clp=1/lob;"
+    "float3 ac=0; float aw=0;"
+    "Et(ac,aw,float2(0,-1)-pp,dir,len2,lob,clp,b); Et(ac,aw,float2(1,-1)-pp,dir,len2,lob,clp,c);"
+    "Et(ac,aw,float2(-1,1)-pp,dir,len2,lob,clp,k0); Et(ac,aw,float2(0,1)-pp,dir,len2,lob,clp,j);"
+    "Et(ac,aw,float2(0,0)-pp,dir,len2,lob,clp,f); Et(ac,aw,float2(-1,0)-pp,dir,len2,lob,clp,e);"
+    "Et(ac,aw,float2(1,1)-pp,dir,len2,lob,clp,k); Et(ac,aw,float2(2,1)-pp,dir,len2,lob,clp,l);"
+    "Et(ac,aw,float2(2,0)-pp,dir,len2,lob,clp,h); Et(ac,aw,float2(1,0)-pp,dir,len2,lob,clp,g);"
+    "Et(ac,aw,float2(1,2)-pp,dir,len2,lob,clp,o); Et(ac,aw,float2(0,2)-pp,dir,len2,lob,clp,m);"
+    "float3 mn=min(min(f,g),min(j,k)),mx=max(max(f,g),max(j,k));"
+    "return float4(min(mx,max(mn,ac/aw)),1);}"
+    // RCAS: uvmax.zw the upscaled size, opts.yz the viewport origin, opts.w the sharpness.
+    "float4 ps_rcas(V i):SV_Target{float2 n=uvmax.zw; int2 p=int2(i.p.xy-opts.yz);"
+    "float3 b=Ld(p+int2(0,-1),n),d=Ld(p+int2(-1,0),n),e=Ld(p,n),f=Ld(p+int2(1,0),n),h=Ld(p+int2(0,1),n);"
+    "float bL=Lu(b),dL=Lu(d),eL=Lu(e),fL=Lu(f),hL=Lu(h);"
+    "float nz=0.25*(bL+dL+fL+hL)-eL;"
+    "float rg=max(max(max(bL,dL),max(eL,fL)),hL)-min(min(min(bL,dL),min(eL,fL)),hL);"
+    "nz=saturate(abs(nz)/max(rg,1.0/65536.0)); nz=-0.5*nz+1;"
+    "float3 mn4=min(min(b,d),min(f,h)),mx4=max(max(b,d),max(f,h));"
+    "float3 hmin=mn4/max(4*mx4,1.0/65536.0),hmax=(1-mx4)/min(4*mn4-4,-1.0/65536.0);"
+    "float3 lr=max(-hmin,hmax); float lobe=max(-(0.25-1.0/16.0),min(max(lr.r,max(lr.g,lr.b)),0))*opts.w*nz;"
+    "return float4((lobe*(b+d+f+h)+e)/(4*lobe+1),1);}";
 
 using CompileFn = decltype(&D3DCompile);
 
@@ -852,7 +1050,8 @@ bool GpuSetup(ID3D11Device* dev) {
   if (!b || FAILED(dev->CreateVertexShader(b->GetBufferPointer(), b->GetBufferSize(), nullptr, &g_gpu.vs))) return false;
   b->Release();
   struct { const char* entry; ID3D11PixelShader** out; } ps[] = {
-      {"ps", &g_gpu.ps_pic}, {"ps_fxaa", &g_gpu.ps_fxaa}, {"ps_overlay", &g_gpu.ps_overlay}};
+      {"ps", &g_gpu.ps_pic}, {"ps_fxaa", &g_gpu.ps_fxaa}, {"ps_overlay", &g_gpu.ps_overlay},
+      {"ps_easu", &g_gpu.ps_easu}, {"ps_rcas", &g_gpu.ps_rcas}};
   for (auto& p : ps) {
     b = blob(p.entry, "ps_5_0");
     if (!b || FAILED(dev->CreatePixelShader(b->GetBufferPointer(), b->GetBufferSize(), nullptr, p.out))) return false;
@@ -1027,7 +1226,7 @@ void ItemText(int it, wchar_t* label, wchar_t* value, bool* greyed) {
                                          : T(L"Tela cheia exclusiva", L"Exclusive fullscreen"));
       break;
     case IT_MONITOR:
-      wcscpy(label, L"Monitor");
+      wcscpy(label, T(L"Monitor", L"Monitor"));
       swprintf(value, 128, L"%d: %ls", (size_t(g_opt.monitor) < g_mon.size() ? g_opt.monitor : 0) + 1,
                MonitorCurrent().name);
       break;
@@ -1058,6 +1257,10 @@ void ItemText(int it, wchar_t* label, wchar_t* value, bool* greyed) {
       swprintf(value, 128, L"%ls (%ux%u)", T(p.pt, p.en), w, h);
       break;
     }
+    case IT_UPSCALE:
+      wcscpy(label, T(L"Ampliação da imagem", L"Upscaling"));
+      wcscpy(value, g_opt.upscale ? L"AMD FSR 1.0" : L"Bilinear");
+      break;
     case IT_ASPECT:
       wcscpy(label, T(L"Proporção da imagem", L"Aspect ratio"));
       wcscpy(value, g_opt.aspect ? T(L"Esticar até a tela", L"Stretch to the screen")
@@ -1092,14 +1295,15 @@ void ItemText(int it, wchar_t* label, wchar_t* value, bool* greyed) {
       break;
     case IT_UI_LANG:
       wcscpy(label, T(L"Idioma do menu", L"Menu language"));
-      wcscpy(value, g_opt.ui_language ? L"English" : L"Português");
+      if (g_opt.ui_language >= 0) wcscpy(value, k_ui_lang_name[g_opt.ui_language]);
+      else swprintf(value, 128, T(L"Automático (%ls)", L"Automatic (%ls)"), k_ui_lang_name[UiLangAuto()]);
       break;
     case IT_LANG:
       wcscpy(label, T(L"Idioma do jogo", L"Game language"));
       wcscpy(value, LanguageName(g_opt.language));
       break;
     case IT_VOLUME:
-      wcscpy(label, L"Volume");
+      wcscpy(label, T(L"Volume", L"Volume"));
       swprintf(value, 128, L"%d%%", g_opt.volume);
       break;
     case IT_RESUME: wcscpy(label, T(L"Voltar ao jogo", L"Back to the game")); break;
@@ -1125,6 +1329,7 @@ const wchar_t* ItemHelp(int it) {
       return T(L"Este jogo avança um passo por quadro: acima de 60 ele ficaria acelerado. 30 economiza energia em notebooks.",
                L"This game advances one step per frame: above 60 it would run too fast. 30 saves power on laptops.");
     case IT_SCALE: return T(L"Resolução em que o jogo é desenhado: maior = imagem mais nítida, mais trabalho para a placa.", L"Higher rendering resolutions give a sharper image and increase GPU load.");
+    case IT_UPSCALE: return T(L"Como a imagem é ampliada quando a resolução interna é menor que a da tela. AMD FSR 1.0 reconstrói as bordas e aumenta a nitidez.", L"How the picture is enlarged when the internal resolution is below the screen's. AMD FSR 1.0 rebuilds edges and sharpens.");
     case IT_ASPECT: return T(L"O jogo é 16:9. Em telas de outro formato, com barras ou esticado.", L"The game is 16:9. On other screen shapes: with bars or stretched.");
     case IT_AA: return T(L"FXAA suaviza as bordas serrilhadas com custo quase nulo.", L"FXAA smooths jagged edges with minimal performance cost.");
     case IT_ANISO: return T(L"Deixa nítidas as texturas vistas em ângulo, como o chão.", L"Sharpens textures viewed at an angle, such as the ground.");
@@ -1135,7 +1340,7 @@ const wchar_t* ItemHelp(int it) {
     }
     case IT_GPU: return T(L"Placa de vídeo usada para desenhar o jogo.", L"Graphics card used to render the game.");
     case IT_SHOW_FPS: return T(L"Mostra os quadros por segundo no canto da tela.", L"Shows frames per second in the corner of the screen.");
-    case IT_UI_LANG: return T(L"Idioma deste menu de configurações. A mudança é imediata.", L"Language of this settings menu. Changes apply immediately.");
+    case IT_UI_LANG: return T(L"Idioma deste menu. Automático segue o idioma do jogo. A mudança é imediata.", L"Language of this settings menu. Automatic follows the game's language. Changes apply immediately.");
     case IT_LANG: return T(L"Idioma dos textos e narração do jogo (o que o disco tiver).", L"Language of the game's text and commentary (as available on the disc).");
     case IT_VOLUME: return T(L"Volume geral do jogo.", L"Overall game volume.");
     case IT_RESUME: return T(L"Salva e volta para onde você estava.", L"Saves settings and returns to the game.");
@@ -1155,6 +1360,7 @@ const Theme* MenuTheme() {
   static Theme loaded;
   const char* enabled = std::getenv("PCS_THEME");
   if (!g_info.theme || (enabled && *enabled == '0')) return nullptr;
+  if (UiLang() == kUiRu) return nullptr;  // the games' Latin fonts have no Cyrillic: Segoe UI
   if (source != g_info.theme) {
     source = g_info.theme;
     loaded = *source;
@@ -1207,6 +1413,10 @@ void ThemeFrame(const ThemeImage& im, int x, int y, int w, int h) {
 
 const ThemeGlyph* Glyph(const ThemeFont& f, wchar_t c) {
   for (const auto& g : f.glyphs) if (g.code == c) return &g;
+  // An accented letter the game's font lacks: its bare letter (É -> E).
+  wchar_t parts[4];
+  if (FoldStringW(MAP_COMPOSITE, &c, 1, parts, 4) > 1 && parts[0] != c)
+    for (const auto& g : f.glyphs) if (g.code == parts[0]) return &g;
   for (const auto& g : f.glyphs) if (g.code == '?') return &g;
   return nullptr;
 }
@@ -1444,8 +1654,8 @@ int g_fps_shown = -1;
 void RenderHint(ID3D11DeviceContext* ctx, int lh) {
   int h = lh * 13 / 10, w = lh * 15;
   if (!g_hint_surface.Resize(g_gpu.dev, w, h)) return;
-  if (g_hint_shown_lang == g_opt.ui_language) return;
-  g_hint_shown_lang = g_opt.ui_language;
+  if (g_hint_shown_lang == UiLang()) return;
+  g_hint_shown_lang = UiLang();
   g_dc = g_hint_surface.dc;
   SelectObject(g_dc, g_hint_surface.bmp);
   SetBkMode(g_dc, TRANSPARENT);
@@ -1508,6 +1718,66 @@ void DrawQuad(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv, const D3D11
   ctx->Draw(3, 0);
   ID3D11ShaderResourceView* none = nullptr;
   ctx->PSSetShaderResources(0, 1, &none);
+}
+
+// A colour target the FSR passes draw into and read back.
+struct Target {
+  ID3D11Device* dev = nullptr;
+  ID3D11Texture2D* tex = nullptr;
+  ID3D11RenderTargetView* rtv = nullptr;
+  ID3D11ShaderResourceView* srv = nullptr;
+  int w = 0, h = 0;
+
+  bool Resize(ID3D11Device* d, int nw, int nh) {
+    if (d == dev && nw == w && nh == h && srv) return true;
+    Release(srv);
+    Release(rtv);
+    Release(tex);
+    D3D11_TEXTURE2D_DESC td{};
+    td.Width = UINT(nw);
+    td.Height = UINT(nh);
+    td.MipLevels = 1;
+    td.ArraySize = 1;
+    td.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    td.SampleDesc.Count = 1;
+    td.Usage = D3D11_USAGE_DEFAULT;
+    td.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+    if (FAILED(d->CreateTexture2D(&td, nullptr, &tex)) || FAILED(d->CreateRenderTargetView(tex, nullptr, &rtv)) ||
+        FAILED(d->CreateShaderResourceView(tex, nullptr, &srv))) {
+      Release(srv);
+      Release(rtv);
+      Release(tex);
+      return false;
+    }
+    dev = d;
+    w = nw;
+    h = nh;
+    return true;
+  }
+};
+
+Target g_fsr_source, g_fsr_easu;
+
+// AMD FSR 1.0 from the picture (cb already holds its constants) to the viewport: the picture at
+// its own size (red/blue fixed, FXAA if chosen), EASU up to the viewport size, RCAS into the
+// back buffer. False when the picture is not smaller than the viewport or a target failed.
+bool DrawFsr(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv, const D3D11_VIEWPORT& vp, const Picture& pic,
+             float tw, float th) {
+  int sw = int(pic.u1 * tw + 0.5f), sh = int(pic.v1 * th + 0.5f);
+  int vw = int(vp.Width), vh = int(vp.Height);
+  if (sw < 16 || sh < 16 || (vw <= sw && vh <= sh)) return false;
+  if (!g_fsr_source.Resize(g_gpu.dev, sw, sh) || !g_fsr_easu.Resize(g_gpu.dev, vw, vh)) return false;
+  D3D11_VIEWPORT src{0, 0, float(sw), float(sh), 0, 1};
+  DrawQuad(ctx, g_fsr_source.rtv, src, g_opt.aa ? g_gpu.ps_fxaa : g_gpu.ps_pic, pic.srv, g_gpu.linear, false);
+  float easu[8] = {float(sw), float(sh), float(vw), float(vh), 0, 0, 0, 0};
+  ctx->UpdateSubresource(g_gpu.cb, 0, nullptr, easu, 0, 0);
+  D3D11_VIEWPORT up{0, 0, float(vw), float(vh), 0, 1};
+  DrawQuad(ctx, g_fsr_easu.rtv, up, g_gpu.ps_easu, g_fsr_source.srv, g_gpu.point, false);
+  // Sharpness 0.2 stops (AMD's default), as a linear amount: exp2(-0.2).
+  float rcas[8] = {0, 0, float(vw), float(vh), 0, vp.TopLeftX, vp.TopLeftY, 0.8705506f};
+  ctx->UpdateSubresource(g_gpu.cb, 0, nullptr, rcas, 0, 0);
+  DrawQuad(ctx, rtv, vp, g_gpu.ps_rcas, g_fsr_easu.srv, g_gpu.point, false);
+  return true;
 }
 
 int g_fps_now = 0;
@@ -1632,7 +1902,8 @@ bool Compose(ID3D11DeviceContext* ctx, const Picture& pic, const BackBufferFn& b
     }
     float cb[8] = {pic.u1, pic.v1, pic.u1 - 0.5f / tw, pic.v1 - 0.5f / th, pic.swap_rb ? 1.0f : 0.0f, 0, 0, 0};
     ctx->UpdateSubresource(g_gpu.cb, 0, nullptr, cb, 0, 0);
-    DrawQuad(ctx, rtv, vp, g_opt.aa ? g_gpu.ps_fxaa : g_gpu.ps_pic, pic.srv, g_gpu.linear, false);
+    if (!(g_opt.upscale && g_info.internal_resolution && DrawFsr(ctx, rtv, vp, pic, tw, th)))
+      DrawQuad(ctx, rtv, vp, g_opt.aa ? g_gpu.ps_fxaa : g_gpu.ps_pic, pic.srv, g_gpu.linear, false);
   }
   D3D11_VIEWPORT full{0, 0, float(bw), float(bh), 0, 1};
   if (g_open) {
@@ -1880,7 +2151,8 @@ void Configure(const GameInfo& info, bool sdk_flags) {
   g_opt.language = IniGet(L"idioma", 0);
   if (!LanguageListed(g_opt.language)) g_opt.language = 0;
   g_opt.volume = Clampi(IniGet(L"volume", 100), 0, 100);
-  g_opt.ui_language = Clampi(IniGet(L"idioma_menu", 0), 0, 1);
+  g_opt.ui_language = Clampi(IniGet(L"idioma_menu", -1), -1, kUiLangCount - 1);
+  g_opt.upscale = Clampi(IniGet(L"ampliacao", 0), 0, 1);
   g_opt.show_fps = Clampi(IniGet(L"mostrar_fps", 0), 0, 1);
   g_hint_enabled = IniGet(L"botao_menu", 1) != 0;
   // Test runs: environment wins over the ini.
@@ -1889,6 +2161,8 @@ void Configure(const GameInfo& info, bool sdk_flags) {
   if (!info.real_time && !info.unlocked_fps && g_opt.fps != 30) g_opt.fps = 60;
   if (int fps = EnvInt("PCS_FPS", -2); fps >= -1) g_opt.fps = fps;  // tests: any rate, any game
   g_opt.aa = EnvInt("PCS_FXAA", g_opt.aa) != 0;
+  g_opt.upscale = EnvInt("PCS_UPSCALE", g_opt.upscale) != 0;
+  g_opt.ui_language = Clampi(EnvInt("PCS_UI_LANGUAGE", g_opt.ui_language), -1, kUiLangCount - 1);
   g_opt.aniso = EnvInt("PCS_ANISO", g_opt.aniso);
   g_opt.show_fps = EnvInt("PCS_SHOW_FPS", g_opt.show_fps) != 0;
   g_opt.display = Clampi(EnvInt("PCS_DISPLAY", g_opt.display), 0, 2);
@@ -1928,7 +2202,7 @@ void Configure(const GameInfo& info, bool sdk_flags) {
 
   // SDK window: opened at the right size and mode; the game in the chosen language.
   uint32_t w, h;
-  InternalSize(g_opt.scale, w, h);
+  WindowSize(g_opt.scale, w, h);
   const Monitor& m = MonitorCurrent();
   int aw = int(m.work.right - m.work.left) * 9 / 10, ah = int(m.work.bottom - m.work.top) * 9 / 10;
   int ww = int(w), wh = int(h);
@@ -2063,9 +2337,10 @@ double GuestRefreshHz() {
     double local = 60.0;
     if ((g_info.real_time || g_info.unlocked_fps) && !g_open) {
       int fps = TargetFps();
-      // Keep the compatibility display interrupt from imposing 60/500 Hz in uncapped mode.
-      // This is an interrupt service rate, not a promise of rendered frames per second.
-      local = fps == 0 ? 1000.0 : fps < 60 ? 60.0 : double(fps);
+      // Keep the compatibility display interrupt from imposing 60/500 Hz in uncapped mode
+      // (BF2's opt-in). This is an interrupt service rate, not a promise of rendered frames.
+      double unlimited = g_info.unlocked_fps ? 1000.0 : 500.0;
+      local = fps == 0 ? unlimited : fps < 60 ? 60.0 : double(fps);
     }
     char text[32];
     if (g_attached) {
