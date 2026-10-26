@@ -23,6 +23,7 @@
 #include <timeapi.h>
 
 #include <d3d11_1.h>
+#include <d3d11sdklayers.h>
 #include <d3dcompiler.h>
 #include <dxgi1_2.h>
 #include <wrl/client.h>
@@ -33,6 +34,7 @@
 #include "cached_state.h"
 #include "parallel_jobs.h"
 #include "shader_compile.h"
+#include "depth_precision.h"
 #include "xenos_hlsl.h"
 
 #include <rex/logging.h>
@@ -321,6 +323,7 @@ enum class Kind { kPoints, kLines, kTris, kRects };
 
 class Renderer {
  public:
+  std::array<uint32_t, 5> diagnostic_draw_args{}; // prim, base, start, count, indexed
   bool Init(HWND hwnd);
   void Draw(uint32_t device, uint32_t prim, std::vector<uint32_t>& vids, const UpDraw* up);
   void Clear(uint32_t device, uint32_t count, uint32_t rects, uint32_t flags, uint32_t color,
@@ -336,7 +339,7 @@ class Renderer {
   bool CreateUtility();
   ComPtr<ID3DBlob> Compile(const std::string& source, const char* entry, const char* target);
   VsEntry* GetVertexShader(uint32_t object);
-  PsEntry* GetPixelShader(uint32_t object, uint32_t param_gen_reg);
+  PsEntry* GetPixelShader(uint32_t object, uint32_t param_gen_reg, bool depth20e4);
   bool ReadUcode(uint32_t object, bool pixel, std::vector<uint32_t>& out);
 
   HostRT* GetRT(uint32_t base, uint32_t format, uint32_t w, uint32_t h, bool depth);
@@ -410,10 +413,10 @@ class Renderer {
     bool fixed_bindings = false;
   } pipeline_cache_;
   ComPtr<ID3D11Buffer> index_ring_;
-  uint32_t index_pos_ = kIndexRingCount;  // first deferred map must discard
+  uint32_t index_pos_ = kIndexRingCount;  // first map, including startup, must discard
 
   ComPtr<ID3D11VertexShader> vs_fs_;
-  ComPtr<ID3D11PixelShader> ps_clear_, ps_copy_, ps_present_;
+  ComPtr<ID3D11PixelShader> ps_clear_, ps_copy_, ps_present_, ps_depth20e4_;
   ComPtr<ID3D11GeometryShader> gs_point_, gs_rect_;
   ComPtr<ID3D11SamplerState> linear_clamp_;
   ComPtr<ID3D11ShaderResourceView> black_2d_, black_3d_, black_cube_;
@@ -500,6 +503,15 @@ class Renderer {
   std::vector<UpDump> up_dumps_;           // traced frame: UP vertex data saved at draw time
   uint32_t capture_frame_ = UINT32_MAX;
   std::ofstream trace_out_;
+  // Optional F12 geometry probe, selected by VS hash in geometry-key.txt.
+  uint64_t geometry_key_ = 0;
+  uint32_t geometry_match_ = 0, geometry_target_ = 0;
+  bool geometry_saved_ = false;
+  struct GeometryCopy { ComPtr<ID3D11Buffer> staging; std::string name; uint32_t bytes; };
+  std::vector<GeometryCopy> geometry_copies_;
+  uint32_t geometry_draw_ = 0;
+  ComPtr<ID3D11InfoQueue> debug_messages_;
+  std::map<D3D11_MESSAGE_ID,unsigned> debug_seen_;
   void TraceLine(const std::string& line) {
     REXLOG_INFO("{}", line);
     if (trace_out_.is_open()) trace_out_ << line << '\n';
@@ -528,6 +540,10 @@ bool Renderer::Init(HWND hwnd) {
   if (FAILED(hr)) {
     REXLOG_ERROR("bf2native: D3D11CreateDevice failed {:08X}", uint32_t(hr));
     return false;
+  }
+  if(flags & D3D11_CREATE_DEVICE_DEBUG) {
+    dev_.As(&debug_messages_);
+    if(debug_messages_) debug_messages_->SetMuteDebugOutput(TRUE);  // retain queue without debugger I/O stalls
   }
   // The guest frame is recorded on a deferred context and executed at Swap, like the console GPU
   // consuming the command buffer after the CPU finished the frame (CPU-written textures such as
@@ -653,11 +669,14 @@ bool Renderer::CreateUtility() {
   auto pp = Compile(util, "ps_present", "ps_5_0");
   auto gp = Compile(gs, "gs_point", "gs_5_0");
   auto gr = Compile(gs, "gs_rect", "gs_5_0");
-  if (!vs || !pc || !pk || !pp || !gp || !gr) return false;
+  auto pd = Compile(std::string(kDepthPrecisionHlsl)+
+      "float main(float4 position:SV_Position):SV_Depth {return xdepth20e4(position.z);}","main","ps_5_0");
+  if (!vs || !pc || !pk || !pp || !gp || !gr || !pd) return false;
   dev_->CreateVertexShader(vs->GetBufferPointer(), vs->GetBufferSize(), nullptr, &vs_fs_);
   dev_->CreatePixelShader(pc->GetBufferPointer(), pc->GetBufferSize(), nullptr, &ps_clear_);
   dev_->CreatePixelShader(pk->GetBufferPointer(), pk->GetBufferSize(), nullptr, &ps_copy_);
   dev_->CreatePixelShader(pp->GetBufferPointer(), pp->GetBufferSize(), nullptr, &ps_present_);
+  dev_->CreatePixelShader(pd->GetBufferPointer(), pd->GetBufferSize(), nullptr, &ps_depth20e4_);
   dev_->CreateGeometryShader(gp->GetBufferPointer(), gp->GetBufferSize(), nullptr, &gs_point_);
   dev_->CreateGeometryShader(gr->GetBufferPointer(), gr->GetBufferSize(), nullptr, &gs_rect_);
 
@@ -825,16 +844,18 @@ VsEntry* Renderer::GetVertexShader(uint32_t object) {
   return r;
 }
 
-PsEntry* Renderer::GetPixelShader(uint32_t object, uint32_t param_gen_reg) {
+PsEntry* Renderer::GetPixelShader(uint32_t object, uint32_t param_gen_reg, bool depth20e4) {
   static thread_local std::vector<uint32_t> ucode;
   if (!ReadUcode(object, true, ucode)) return nullptr;
-  uint64_t key = XXH3_64bits(ucode.data(), ucode.size() * 4) ^ (uint64_t(param_gen_reg) << 56);
+  uint64_t key = XXH3_64bits(ucode.data(), ucode.size() * 4) ^ (uint64_t(param_gen_reg) << 56) ^
+                 (depth20e4 ? 0xD2420E4A91F3B507ull : 0);
   auto it = ps_cache_.find(key);
   if (it != ps_cache_.end()) return it->second->ps ? it->second.get() : nullptr;
   auto e = std::make_unique<PsEntry>();
   e->key = key;
   TranslateOptions opt;
   opt.ps_param_gen_reg = param_gen_reg;
+  opt.depth20e4 = depth20e4;
   std::string hlsl = TranslateXenosShader(ucode.data(), uint32_t(ucode.size()), true, opt, e->info);
   DumpHlsl("ps", object, hlsl);
   if (auto blob = Compile(hlsl, "main", "ps_5_0")) {
@@ -1615,7 +1636,8 @@ void Renderer::Draw(uint32_t device, uint32_t prim, std::vector<uint32_t>& vids,
   uint32_t program_cntl = Reg(device, 0x2180);
   uint32_t param_gen = (program_cntl >> 18) & 1 ? (Reg(device, 0x2181) >> 8) & 0xFF : ~0u;
   uint32_t ps_object = LoadV(device + dev::kPixelShader);
-  PsEntry* ps = ps_object ? GetPixelShader(ps_object, param_gen) : nullptr;
+  const bool depth20e4=false; // Quantization experiment did not fix terrain; retain hardware early-Z.
+  PsEntry* ps = ps_object ? GetPixelShader(ps_object, param_gen, depth20e4) : nullptr;
   if (ps_object && !ps) return skip("pixel shader");
 
   // BF2_SKIP_SHADER=<hash>[,<hash>...]: debugging aid, drops draws using those shaders (keys as
@@ -1718,6 +1740,58 @@ void Renderer::Draw(uint32_t device, uint32_t prim, std::vector<uint32_t>& vids,
   }
 
   // --- Textures and samplers.
+  if (frame_ == capture_frame_ && geometry_key_ == vs->key && !geometry_saved_ &&
+      geometry_match_++ == geometry_target_) {
+    geometry_saved_ = true;
+    geometry_draw_ = frame_draws_;
+    auto write = [&](const std::string& name, const void* data, size_t bytes) {
+      std::ofstream file(out_dir_ / name, std::ios::binary);
+      file.write(static_cast<const char*>(data), std::streamsize(bytes));
+    };
+    write("geometry-state.bin", &st, sizeof(st));
+    std::array<uint32_t,1024> vc;
+    for(size_t i=0;i<vc.size();++i) vc[i]=Be32(d+dev::kVsConstants+i*4);
+    write("geometry-constants.bin",vc.data(),sizeof(vc));
+    write("geometry-indices.bin",host_indices.data(),host_indices.size()*sizeof(uint32_t));
+    write("geometry-source-indices.bin",vids.data(),vids.size()*sizeof(uint32_t));
+    std::ofstream info(out_dir_ / "geometry.txt");
+    info << "draw " << frame_draws_ << " prim " << prim << " vs " << std::hex
+         << LoadV(device+dev::kVertexShader) << " key " << vs->key << std::dec << '\n';
+    info << "up " << (up != nullptr) << " args";
+    for (uint32_t arg : diagnostic_draw_args) info << ' ' << arg;
+    info << "\nindex_max " << Reg(device, 0x2100) << " index_min " << Reg(device, 0x2101)
+         << " index_offset " << Reg(device, 0x2102) << '\n';
+    const uint8_t* physical=Mem()->physical_membase();
+    for(uint32_t k=0;k<96;++k) {
+      if(!((vs->info.vfetch_used[k>>6]>>(k&63))&1)) continue;
+      uint32_t d0=st.xf[k*2],d1=st.xf[k*2+1],address=d0&0x1ffffffcu;
+      if((d0&3)!=3) continue;
+      uint32_t bytes=std::min({((d1>>2)&0xffffffu)*4,4u<<20,kPhysicalSize-address});
+      info << "fetch " << k << " address " << std::hex << address << " d0 " << d0
+           << " d1 " << d1 << std::dec << " bytes " << bytes << '\n';
+      if(!bytes) continue;
+      std::string name="geometry-fetch"+std::to_string(k);
+      write(name+"-cpu.bin",physical+address,bytes);
+      D3D11_BUFFER_DESC desc{};
+      desc.ByteWidth=bytes; desc.Usage=D3D11_USAGE_STAGING; desc.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
+      ComPtr<ID3D11Buffer> staging;
+      if(SUCCEEDED(dev_->CreateBuffer(&desc,nullptr,&staging))) {
+        D3D11_BOX box{address,0,0,address+bytes,1,1};
+        ctx_->CopySubresourceRegion(staging.Get(),0,0,0,0,mirror_.Get(),0,&box);
+        geometry_copies_.push_back({staging,name+"-gpu.bin",bytes});
+      }
+      // Keep declared buffers intact; capture neighboring bytes separately for OOB diagnosis.
+      uint32_t extended = std::min(bytes + (64u << 10), kPhysicalSize - address);
+      write(name+"-extended-cpu.bin",physical+address,extended);
+      desc.ByteWidth=extended;
+      staging.Reset();
+      if(SUCCEEDED(dev_->CreateBuffer(&desc,nullptr,&staging))) {
+        D3D11_BOX box{address,0,0,address+extended,1,1};
+        ctx_->CopySubresourceRegion(staging.Get(),0,0,0,0,mirror_.Get(),0,&box);
+        geometry_copies_.push_back({staging,name+"-extended-gpu.bin",extended});
+      }
+    }
+  }
   auto bind_textures = [&](const ShaderInfo& info, bool pixel) {
     ID3D11ShaderResourceView* srvs[1 + kStackedSrvBase + 16] = {};
     uint32_t srv_count = 0;
@@ -1967,7 +2041,7 @@ void Renderer::Draw(uint32_t device, uint32_t prim, std::vector<uint32_t>& vids,
   }
   D3D11_MAPPED_SUBRESOURCE m;
   if (FAILED(ctx_->Map(index_ring_.Get(), 0, map, 0, &m))) {
-    index_pos_ = kIndexRingCount;  // retry with DISCARD after a failed upload
+    index_pos_=kIndexRingCount;  // retry with DISCARD if a previous upload failed
     return;
   }
   std::memcpy(static_cast<uint32_t*>(m.pData) + index_pos_, host_indices.data(), count * 4);
@@ -1987,12 +2061,31 @@ void Renderer::Draw(uint32_t device, uint32_t prim, std::vector<uint32_t>& vids,
                              : kind == Kind::kRects ? gs_rect_.Get()
                                                     : nullptr;
   if (pipeline_cache_.gs.Changed(gs)) ctx_->GSSetShader(gs, nullptr, 0);
-  auto* pixel_shader = ps ? ps->ps.Get() : nullptr;
+  auto* pixel_shader = ps ? ps->ps.Get() : (depth20e4 && t.depth ? ps_depth20e4_.Get() : nullptr);
   if (pipeline_cache_.ps.Changed(pixel_shader)) ctx_->PSSetShader(pixel_shader, nullptr, 0);
   ComPtr<ID3D11Query> stats;
   if (frame_ == trace_frame_) {
     D3D11_QUERY_DESC qd{D3D11_QUERY_PIPELINE_STATISTICS, 0};
     if (SUCCEEDED(dev_->CreateQuery(&qd, &stats))) ctx_->Begin(stats.Get());
+  }
+  if(frame_==capture_frame_ && geometry_draw_==frame_draws_) {
+    auto snapshot=[&](ID3D11Buffer* source,uint32_t offset,uint32_t bytes,const char* name) {
+      D3D11_BUFFER_DESC desc{}; desc.ByteWidth=bytes;
+      desc.Usage=D3D11_USAGE_STAGING; desc.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
+      ComPtr<ID3D11Buffer> staging;
+      if(SUCCEEDED(dev_->CreateBuffer(&desc,nullptr,&staging))) {
+        D3D11_BUFFER_DESC original; source->GetDesc(&original);
+        if(!offset && bytes==original.ByteWidth) ctx_->CopyResource(staging.Get(),source);
+        else {
+          D3D11_BOX box{offset,0,0,offset+bytes,1,1};
+          ctx_->CopySubresourceRegion(staging.Get(),0,0,0,0,source,0,&box);
+        }
+        geometry_copies_.push_back({staging,name,bytes});
+      }
+    };
+    snapshot(vs_consts_.Get(),0,4096,"geometry-constants-gpu.bin");
+    snapshot(state_cb_.Get(),0,sizeof(XState),"geometry-state-gpu.bin");
+    snapshot(index_ring_.Get(),index_pos_*4,count*4,"geometry-indices-gpu.bin");
   }
   ctx_->DrawIndexed(count, index_pos_, 0);
   index_pos_ += count;
@@ -2475,6 +2568,25 @@ void Renderer::DumpSrv(ID3D11ShaderResourceView* srv, uint32_t w, uint32_t h,
 
 // F12: the next frame is the capture (see capture_request).
 void Renderer::BeginCapture() {
+  geometry_key_=0;
+  geometry_match_=geometry_target_=0;
+  geometry_saved_=false;
+  geometry_draw_=0;
+  {
+    std::ifstream key(cache_dir_.parent_path()/"geometry-key.txt");
+    key >> std::hex >> geometry_key_;
+    key >> std::dec >> geometry_target_;
+  }
+  // Explicit F12 diagnostic override; an empty file restores all draws.
+  {
+    std::ifstream skip(cache_dir_.parent_path()/"skip-shaders.txt");
+    if(skip) {
+      skip_shaders_.clear();
+      uint64_t key;
+      while(skip >> std::hex >> key) if(key) skip_shaders_.push_back(key);
+      skip_toggle_=false;
+    }
+  }
   // Optional live diagnostic probe; avoids restarting the game to move the sampled pixel.
   {
     std::ifstream probe(cache_dir_.parent_path() / "step-region.txt");
@@ -2572,6 +2684,19 @@ void Renderer::Swap(uint32_t device, uint32_t front_texture) {
     pipeline_cache_ = {};
     index_pos_ = kIndexRingCount;  // the next command list must start with a discarding map
   }
+  if(debug_messages_) {
+    const uint64_t count=debug_messages_->GetNumStoredMessagesAllowedByRetrievalFilter();
+    for(uint64_t i=0;i<count;++i) {
+      SIZE_T bytes=0; debug_messages_->GetMessage(i,nullptr,&bytes);
+      if(!bytes || bytes>(1u<<20)) continue;
+      std::vector<uint8_t> storage(bytes);
+      auto* message=reinterpret_cast<D3D11_MESSAGE*>(storage.data());
+      if(SUCCEEDED(debug_messages_->GetMessage(i,message,&bytes)) &&
+         message->Severity<=D3D11_MESSAGE_SEVERITY_WARNING && debug_seen_[message->ID]++<3)
+        REXLOG_WARN("bf2d3d: id {} severity {} {}",int(message->ID),int(message->Severity),message->pDescription);
+    }
+    debug_messages_->ClearStoredMessages();
+  }
   for (auto& [draw, q] : draw_stats_) {
     D3D11_QUERY_DATA_PIPELINE_STATISTICS ps{};
     while (imm_->GetData(q.Get(), &ps, sizeof(ps), 0) == S_FALSE) std::this_thread::yield();
@@ -2579,6 +2704,15 @@ void Renderer::Swap(uint32_t device, uint32_t front_texture) {
               ps.PSInvocations);
   }
   draw_stats_.clear();
+  for(const auto& copy:geometry_copies_) {
+    D3D11_MAPPED_SUBRESOURCE mapped;
+    if(SUCCEEDED(imm_->Map(copy.staging.Get(),0,D3D11_MAP_READ,0,&mapped))) {
+      std::ofstream file(out_dir_/copy.name,std::ios::binary);
+      file.write(static_cast<const char*>(mapped.pData),copy.bytes);
+      imm_->Unmap(copy.staging.Get(),0);
+    }
+  }
+  geometry_copies_.clear();
   if (frame_ == dump_targets_frame_) {
     SaveSteps();
     char name[64];
@@ -2694,6 +2828,7 @@ void RendererDraw(uint32_t device, uint32_t prim, int32_t base_vertex, uint32_t 
                   uint32_t count, bool indexed) {
   if (!g_renderer || !count) return;
   std::lock_guard<std::mutex> lock(g_renderer->mutex);
+  g_renderer->diagnostic_draw_args = {prim, uint32_t(base_vertex), start, count, uint32_t(indexed)};
   static thread_local std::vector<uint32_t> vids;
   vids.resize(count);
   if (indexed) {

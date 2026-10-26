@@ -19,6 +19,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <vector>
 
 struct ID3D11Device;
 struct ID3D11DeviceContext;
@@ -54,6 +55,53 @@ struct Language {
   const wchar_t* name;
 };
 
+// Optional runtime-owned menu assets. Pixels are straight-alpha 0xAARRGGBB;
+// colours below are 0xRRGGBB. Metrics use a 1280x720 design canvas.
+struct ThemeGlyph {
+  uint16_t code, x, y;
+  uint8_t width, height;
+  int8_t offset_x;
+  uint8_t offset_y;
+  uint16_t advance;
+};
+struct ThemeImage {
+  int width = 0, height = 0;
+  std::vector<uint32_t> rgba;
+};
+struct ThemeFont {
+  ThemeImage atlas;
+  std::vector<ThemeGlyph> glyphs;
+  int line_height = 22;
+};
+struct Theme {
+  ThemeFont font;
+  ThemeFont title_font;  // optional larger face for the title (empty = font)
+  ThemeImage highlight, button_a, button_b, panel_top, panel_bottom;
+  uint32_t text = 0xe5e5cf, muted = 0x929582, accent = 0xb8ba56;
+  uint32_t selected_text = 0x171a10, panel = 0x20251b;
+  // Optional per-part colours (0 = the colour above).
+  uint32_t row_text = 0, title_text = 0, title_outline = 0;
+  int row_height = 21, padding = 12, panel_width = 960, top = 160;
+  int row_gap = 0;  // gap between row bars (the selected bar keeps the gap too)
+  bool title_left = false;
+  bool title_rule = false;        // accent rule under the title
+  bool flat_highlight = false;    // solid accent bar instead of the stripe fallback
+  bool dots = true;               // dotted frame accents of the shared design
+  float text_scale = 1.0f;        // on top of the 1280x720 canvas scale
+  float title_scale = 1.0f;       // on top of the shared 1.25x title scale
+  void (*load)(Theme&) = nullptr;
+};
+
+// A post-process effect the game draws that the player may turn off.
+struct Effect {
+  const char* key;          // ini key in [opcoes], e.g. "motion_blur"
+  const wchar_t* name_pt;
+  const wchar_t* name_en;
+  const wchar_t* help_pt;
+  const wchar_t* help_en;
+  bool default_on = true;
+};
+
 struct GameInfo {
   const wchar_t* title = L"";        // e.g. L"FIFA STREET 3"
   const char* window_title = "";     // e.g. "FIFA Street 3"
@@ -65,12 +113,15 @@ struct GameInfo {
   // it may run above 60 fps, so the menu offers "monitor rate" and "no limit". Games that
   // advance one fixed step per frame keep 60 (more frames would speed them up).
   bool real_time = false;
-  // Explicit opt-in before high-rate simulation timing has been validated.
+  // Explicit opt-in to high frame rates before simulation timing has been validated.
   bool unlocked_fps = false;
   int native_width = 1280, native_height = 720;
   // Football games: the keyboard plays as the controller with the EA SPORTS FC 27 "WASD"
   // layout (basic actions only), unless the ini has teclado=0.
   bool football_keyboard = false;
+  const Theme* theme = nullptr;  // caller-owned, must outlive the renderer
+  const Effect* effects = nullptr;  // caller-owned, must outlive the renderer
+  int effect_count = 0;             // at most 8
 };
 
 // The guest picture to show this frame.
@@ -92,7 +143,10 @@ void Configure(const GameInfo& info, bool sdk_flags = true);
 const Settings& Get();
 
 // Boot-time values for the renderer.
-float ResolutionScale();          // internal resolution factor (1 = 720p)
+float ResolutionScale();          // internal resolution factor (1 = 720p); changes live (read per frame)
+// Live, thread-safe effect value. Before Configure supplies descriptors, defaults to on.
+// Configure applies each descriptor's default_on; out-of-range indices return on.
+bool EffectEnabled(int index);
 int Anisotropy();                 // 0 = the game's filtering
 uint32_t SwapChainFlags();        // for CreateSwapChainForHwnd and ResizeBuffers
 IDXGIAdapter1* Adapter();         // chosen adapter (caller releases) or null for the default
@@ -102,12 +156,16 @@ long CreateDevice(unsigned flags, ID3D11Device** device, ID3D11DeviceContext** c
 float Volume();                   // 0..1 (0 while the menu is open)
 // Rate of the guest's vertical blank: the vblank interrupt and the flip pacing of the
 // presentation interval. 60 as on the console; for a real-time game, the chosen frame rate
-// (the monitor's, or 1000 with no limit). Changes live: read it every tick. PCS_VBLANK_HZ
+// (the monitor's, or 500 with no limit). Changes live: read it every tick. PCS_VBLANK_HZ
 // forces a rate (timing experiments).
 double GuestRefreshHz();
 bool MenuOpen();
 // Opens the menu at the next frame (an entry of the game's own menus leads here).
 void RequestMenu();
+// The game is on its own menus (title, main menu, options, pause): a "PC settings" button is
+// shown over them (BACK + START / F1, or a click). Call it every frame or input poll; the button
+// hides by itself when the calls stop for half a second. ini botao_menu=0 hides it.
+void SetGameMenus(bool on_menus);
 // Lines of the game's own menus lead to this menu (ini menu_no_jogo, default on; read by every
 // module of the process).
 bool GameMenuEntry();
@@ -118,3 +176,4 @@ void Present(ID3D11Device* device, ID3D11DeviceContext* context, IDXGISwapChain1
              const Picture& picture, const BackBufferFn& back_buffer);
 
 }  // namespace pcs
+

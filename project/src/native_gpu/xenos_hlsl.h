@@ -45,6 +45,8 @@ struct ShaderInfo {
 struct TranslateOptions {
   // Pixel shader: GPR that receives PsParamGen (SQ_CONTEXT_MISC.param_gen_pos), or ~0u.
   uint32_t ps_param_gen_reg = ~0u;
+  // Preserve Xenos 20e4 precision before host depth testing/writes.
+  bool depth20e4 = false;
 };
 
 // `ucode` is in host byte order. Returns HLSL with entry point "main".

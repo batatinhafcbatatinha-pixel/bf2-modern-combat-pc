@@ -53,6 +53,35 @@ wchar_t g_ini[MAX_PATH];
 bool g_use_ini = true;
 bool g_configured = false;
 
+constexpr int kMaxEffects = 8;
+static_assert(std::atomic<uint32_t>::is_always_lock_free);
+std::atomic<uint32_t> g_effect_mask{0xff};
+std::atomic<bool> g_effect_remote{false};
+std::atomic<int64_t> g_effect_checked{-1000000};
+std::atomic_flag g_effect_reading = ATOMIC_FLAG_INIT;
+
+std::wstring EffectKey(int i) {
+  const char* key = g_info.effects[i].key;
+  return std::wstring(key, key + std::strlen(key));  // ini keys are ASCII
+}
+
+void PublishEffects() {
+  char text[16];
+  std::snprintf(text, sizeof(text), "%u", unsigned(g_effect_mask.load()));
+  SetEnvironmentVariableA("PCS_FX_MASK", text);
+}
+
+bool ReadEffects(uint32_t& mask) {
+  char text[16];
+  DWORD n = GetEnvironmentVariableA("PCS_FX_MASK", text, sizeof(text));
+  if (!n || n >= sizeof(text)) return false;
+  char* end = nullptr;
+  unsigned long value = std::strtoul(text, &end, 10);
+  if (end == text || *end || value > 255) return false;
+  mask = uint32_t(value);
+  return true;
+}
+
 const wchar_t* T(const wchar_t* pt, const wchar_t* en) { return g_opt.ui_language ? en : pt; }
 
 // Internal resolution presets: lines drawn (the games render 720); 0 = the monitor's.
@@ -63,8 +92,11 @@ const ResPreset k_res[] = {
     {1440, L"1440p (QHD)", L"1440p (QHD)"},
     {2160, L"2160p (4K)", L"2160p (4K)"},
     {0, L"Resolução do monitor", L"Monitor resolution"},
+    {4320, L"4320p (8K)", L"4320p (8K)"},
 };
 constexpr int kNumRes = int(sizeof(k_res) / sizeof(k_res[0]));
+// Menu order (the ini keeps the index above: 8K came later, after "monitor").
+const int k_res_order[] = {0, 1, 2, 3, 5, 4};
 const int k_fps[] = {60, kFpsMonitor, 0, 30};
 const int k_fps_fixed[] = {60, 30};
 const int k_aniso[] = {0, 2, 4, 8, 16};
@@ -99,6 +131,8 @@ void SaveIni() {
   IniPut(L"volume", g_opt.volume);
   IniPut(L"idioma_menu", g_opt.ui_language);
   IniPut(L"mostrar_fps", g_opt.show_fps);
+  for (int i = 0; i < g_info.effect_count; ++i)
+    IniPut(EffectKey(i).c_str(), EffectEnabled(i) ? 1 : 0);
 }
 
 bool LanguageListed(int id) {
@@ -293,7 +327,8 @@ void InternalSize(int scale, uint32_t& w, uint32_t& h) {
 
 enum Item {
   IT_DISPLAY, IT_MONITOR, IT_REFRESH, IT_VSYNC, IT_FPS, IT_SCALE, IT_ASPECT, IT_AA, IT_ANISO,
-  IT_API, IT_GPU, IT_SHOW_FPS, IT_UI_LANG, IT_LANG, IT_VOLUME, IT_RESUME, IT_RESTART, IT_QUIT,
+  IT_EFFECT0, IT_EFFECT_END = IT_EFFECT0 + kMaxEffects,
+  IT_API = IT_EFFECT_END, IT_GPU, IT_SHOW_FPS, IT_UI_LANG, IT_LANG, IT_VOLUME, IT_RESUME, IT_RESTART, IT_QUIT,
   IT_COUNT
 };
 
@@ -317,14 +352,26 @@ Rect g_rows[IT_COUNT];
 Rect g_value_left[IT_COUNT];  // the "◀" end of a selected value
 Rect g_hint_a, g_hint_b;
 
+// The "PC settings" button over the game's own menus.
+std::atomic<int64_t> g_game_menus_until{0};  // ms (steady clock) until which the button shows
+Rect g_hint_rect{};                          // where it is, in back-buffer pixels (mouse clicks)
+int g_hint_shown_lang = -1;
+bool g_hint_enabled = true;
+
+int64_t SteadyMs() {
+  return std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now().time_since_epoch()).count();
+}
+
+bool HintVisible() { return g_hint_enabled && !g_open && SteadyMs() < g_game_menus_until.load(); }
+
+
 bool RestartPending() {
-  return g_opt.scale != g_boot.scale || g_opt.adapter != g_boot.adapter || g_opt.language != g_boot.language ||
+  return g_opt.adapter != g_boot.adapter || g_opt.language != g_boot.language ||
          g_opt.api != g_boot.api;
 }
 
 bool ItemRestart(int it) {
   switch (it) {
-    case IT_SCALE: return g_opt.scale != g_boot.scale;
     case IT_GPU: return g_opt.adapter != g_boot.adapter;
     case IT_API: return g_opt.api != g_boot.api;
     case IT_LANG: return g_opt.language != g_boot.language;
@@ -333,6 +380,7 @@ bool ItemRestart(int it) {
 }
 
 bool ItemVisible(int it) {
+  if (it >= IT_EFFECT0 && it < IT_EFFECT_END) return it - IT_EFFECT0 < g_info.effect_count;
   switch (it) {
     case IT_SCALE: return g_info.internal_resolution;
     case IT_LANG: return g_info.language_count > 1;
@@ -349,6 +397,14 @@ int Cycle(const int* list, int n, int cur, int d) {
 }
 
 void Change(int it, int d) {
+  if (it >= IT_EFFECT0 && it < IT_EFFECT_END) {
+    if (!ItemVisible(it)) return;
+    EffectEnabled(it - IT_EFFECT0);  // refresh a DLL copy before changing its value
+    g_effect_mask.fetch_xor(1u << (it - IT_EFFECT0));
+    PublishEffects();
+    g_dirty = true;
+    return;
+  }
   std::vector<int> list;
   switch (it) {
     case IT_DISPLAY:
@@ -372,7 +428,7 @@ void Change(int it, int d) {
       g_opt.fps = (g_info.real_time || g_info.unlocked_fps) ? Cycle(k_fps, 4, g_opt.fps, d) : Cycle(k_fps_fixed, 2, g_opt.fps, d);
       g_display_hz_at = 0;
       break;
-    case IT_SCALE: g_opt.scale = (g_opt.scale + kNumRes + d) % kNumRes; break;
+    case IT_SCALE: g_opt.scale = Cycle(k_res_order, kNumRes, g_opt.scale, d); break;
     case IT_ASPECT: g_opt.aspect = !g_opt.aspect; break;
     case IT_AA: g_opt.aa = !g_opt.aa; break;
     case IT_ANISO: g_opt.aniso = Cycle(k_aniso, 5, g_opt.aniso, d); break;
@@ -584,7 +640,14 @@ class InputListener final : public rex::ui::WindowInputListener {
 
  private:
   void Push(rex::ui::MouseEvent& e, Event::Kind kind) {
-    if (!g_open) return;
+    if (!g_open) {
+      if (kind == Event::kClick && e.button() == rex::ui::MouseEvent::Button::kLeft && HintVisible() &&
+          g_hint_rect.in(e.x(), e.y())) {
+        e.set_handled(true);
+        g_request = true;
+      }
+      return;
+    }
     e.set_handled(true);
     int value = 0;
     if (kind == Event::kClick) {
@@ -874,7 +937,7 @@ struct Surface {
   void Upload(ID3D11DeviceContext* ctx) { ctx->UpdateSubresource(tex, 0, nullptr, bits, UINT(w) * 4, 0); }
 };
 
-Surface g_menu, g_fps_surface;
+Surface g_menu, g_fps_surface, g_hint_surface;
 HFONT g_font, g_font_bold, g_font_small, g_font_title;
 int g_font_lh = 0;
 
@@ -947,6 +1010,12 @@ int ButtonHint(int x, int y, int lh, wchar_t letter, COLORREF c, const wchar_t* 
 void ItemText(int it, wchar_t* label, wchar_t* value, bool* greyed) {
   *greyed = false;
   value[0] = 0;
+  if (it >= IT_EFFECT0 && it < IT_EFFECT_END && ItemVisible(it)) {
+    const Effect& effect = g_info.effects[it - IT_EFFECT0];
+    swprintf(label, 128, L"%ls", T(effect.name_pt, effect.name_en));
+    wcscpy(value, EffectEnabled(it - IT_EFFECT0) ? T(L"Ligado", L"On") : T(L"Desligado", L"Off"));
+    return;
+  }
   switch (it) {
     case IT_DISPLAY:
       wcscpy(label, T(L"Modo de tela", L"Display mode"));
@@ -1040,6 +1109,10 @@ void ItemText(int it, wchar_t* label, wchar_t* value, bool* greyed) {
 }
 
 const wchar_t* ItemHelp(int it) {
+  if (it >= IT_EFFECT0 && it < IT_EFFECT_END && ItemVisible(it)) {
+    const Effect& effect = g_info.effects[it - IT_EFFECT0];
+    return T(effect.help_pt, effect.help_en);
+  }
   switch (it) {
     case IT_DISPLAY: return T(L"Janela, tela cheia sem bordas (troca rápida com Alt+Tab) ou tela cheia exclusiva.", L"Windowed, borderless fullscreen (quick Alt+Tab) or exclusive fullscreen.");
     case IT_MONITOR: return T(L"Em qual monitor o jogo aparece.", L"Monitor used to display the game.");
@@ -1076,7 +1149,225 @@ constexpr COLORREF kBg = RGB(10, 16, 30);
 constexpr uint32_t kBgPixel = 0x0A101Eu;  // the same colour as a DIB pixel
 constexpr uint32_t kBgAlpha = 0xE0000000u;
 
+// The optional theme is copied once; the game loader retains no pointers into archives.
+const Theme* MenuTheme() {
+  static const Theme* source = nullptr;
+  static Theme loaded;
+  const char* enabled = std::getenv("PCS_THEME");
+  if (!g_info.theme || (enabled && *enabled == '0')) return nullptr;
+  if (source != g_info.theme) {
+    source = g_info.theme;
+    loaded = *source;
+    if (loaded.load) loaded.load(loaded);
+  }
+  const auto& atlas = loaded.font.atlas;
+  return loaded.font.glyphs.empty() || atlas.width <= 0 || atlas.height <= 0 ||
+         atlas.rgba.size() != size_t(atlas.width) * atlas.height ? nullptr : &loaded;
+}
+
+void ThemePixel(int x, int y, uint32_t c) {
+  if (x < 0 || y < 0 || x >= g_menu.w || y >= g_menu.h) return;
+  uint32_t& dst = g_menu.bits[y * g_menu.w + x];
+  unsigned a = c >> 24, da = dst >> 24;
+  unsigned out = a + da * (255 - a) / 255;
+  if (!out) return;
+  uint32_t rgb = 0;
+  for (int shift : {0, 8, 16}) {
+    unsigned v = (((c >> shift) & 255) * a +
+                  ((dst >> shift) & 255) * da * (255 - a) / 255) / out;
+    rgb |= v << shift;
+  }
+  dst = rgb | (out << 24);
+}
+
+void ThemeFill(int x, int y, int w, int h, uint32_t c) {
+  for (int yy = std::max(0, y); yy < std::min(g_menu.h, y + h); ++yy)
+    for (int xx = std::max(0, x); xx < std::min(g_menu.w, x + w); ++xx)
+      ThemePixel(xx, yy, c);
+}
+
+void ThemeBlit(const ThemeImage& im, int x, int y, int w, int h) {
+  if (im.width <= 0 || im.height <= 0 || w <= 0 || h <= 0 ||
+      im.rgba.size() != size_t(im.width) * im.height) return;
+  for (int yy = 0; yy < h; ++yy)
+    for (int xx = 0; xx < w; ++xx)
+      ThemePixel(x + xx, y + yy, im.rgba[(yy * im.height / h) * im.width + xx * im.width / w]);
+}
+
+// Preserve the native dotted corners; repeat the straight section at its original scale.
+void ThemeFrame(const ThemeImage& im, int x, int y, int w, int h) {
+  if (im.width < 128 || im.height <= 0 || im.rgba.size() != size_t(im.width) * im.height || h <= 0) return;
+  int cap = std::max(1, 64 * h / im.height);
+  for (int yy = 0; yy < h; ++yy) for (int xx = 0; xx < w; ++xx) {
+    int sx = xx < cap ? xx * 64 / cap : xx >= w - cap ? (w - 1 - xx) * 64 / cap :
+             64 + ((xx - cap) * im.height / h) % (im.width - 64);
+    ThemePixel(x + xx, y + yy, im.rgba[(yy * im.height / h) * im.width + sx]);
+  }
+}
+
+const ThemeGlyph* Glyph(const ThemeFont& f, wchar_t c) {
+  for (const auto& g : f.glyphs) if (g.code == c) return &g;
+  for (const auto& g : f.glyphs) if (g.code == '?') return &g;
+  return nullptr;
+}
+
+int ThemeText(const Theme& t, const ThemeFont& font, const wchar_t* text, int x, int y, int width,
+              float scale, uint32_t color, bool right = false, bool paint = true) {
+  std::wstring str(text);
+  if (!str.empty()) CharUpperBuffW(str.data(), DWORD(str.size()));
+  auto measure = [&](const std::wstring& v) {
+    float n = 0;
+    for (wchar_t c : v) if (auto g = Glyph(font, c)) n += g->advance * scale;
+    return int(std::ceil(n));
+  };
+  if (measure(str) > width) {
+    while (!str.empty() && measure(str + L"...") > width) str.pop_back();
+    str += L"...";
+  }
+  int size = measure(str);
+  if (!paint) return size;
+  float pen = float(right ? x + width - size : x);
+  for (wchar_t c : str) {
+    const auto* g = Glyph(font, c);
+    if (!g) continue;
+    int gw = int(std::round(g->width * scale)), gh = int(std::round(g->height * scale));
+    for (int yy = 0; yy < gh; ++yy) for (int xx = 0; xx < gw; ++xx) {
+      int ax = g->x + xx * g->width / gw, ay = g->y + yy * g->height / gh;
+      if (ax >= font.atlas.width || ay >= font.atlas.height) continue;
+      uint32_t a = font.atlas.rgba[ay * font.atlas.width + ax] & 0xff000000;
+      int px = int(std::round(pen)) + int(std::round(g->offset_x * scale)) + xx;
+      if (px >= x && px < x + width)
+        ThemePixel(px, y + int(std::round(g->offset_y * scale)) + yy, a | color);
+    }
+    pen += g->advance * scale;
+  }
+  return size;
+}
+
+void RenderThemedMenu(ID3D11DeviceContext* ctx, const Theme& t) {
+  // Uniform scaling also preserves the original proportions on ultrawide windows.
+  float scale = std::min(g_menu.w / 1280.f, g_menu.h / 720.f);
+  auto S = [&](int n) { return int(std::round(n * scale)); };
+  int ox = (g_menu.w - S(1280)) / 2, oy = (g_menu.h - S(720)) / 2;
+  int x = ox + S((1280 - t.panel_width) / 2), w = S(t.panel_width);
+  int y = oy + S(t.top), panel_y = y, lh = std::max(1, S(t.row_height)), pad = S(t.padding);
+  int row_h = std::max(1, lh - S(t.row_gap));
+  float ts = scale * t.text_scale;
+  const ThemeFont& title_font = t.title_font.glyphs.empty() ? t.font : t.title_font;
+  const uint32_t title_color = t.title_text ? t.title_text : t.text;
+  std::fill(g_menu.bits, g_menu.bits + size_t(g_menu.w) * g_menu.h, 0xa8060905u);
+  auto dots = [&](int dy) {
+    if (!t.dots) return;
+    for (int dx = x; dx < x + w; dx += std::max(2, S(5)))
+      ThemeFill(dx, dy, std::max(1, S(2)), std::max(1, S(2)), 0xff000000 | t.accent);
+  };
+  const wchar_t* title = T(L"CONFIGURAÇÕES DO PC", L"PC SETTINGS");
+  float title_scale = scale * 1.25f * t.title_scale;
+  int title_width = ThemeText(t, title_font, title, 0, 0, w, title_scale, title_color, false, false);
+  int title_x = t.title_left ? x : x + w - title_width - S(24);
+  ThemeFrame(t.panel_top, title_x - S(4), y - S(54), title_width + S(28), S(54));
+  if (t.title_outline) {
+    // EA's front ends outline the big title with the dark ink of the rows.
+    for (int dy : {-1, 0, 1}) for (int dx : {-1, 0, 1}) {
+      if (!dx && !dy) continue;
+      ThemeText(t, title_font, title, x + dx, y - S(46) + dy, w - S(8), title_scale,
+                t.title_outline, !t.title_left);
+    }
+  }
+  ThemeText(t, title_font, title, x, y - S(46), w - S(8), title_scale, title_color, !t.title_left);
+  if (t.title_rule) ThemeFill(x, y - S(10), w, std::max(1, S(2)), 0xff000000 | t.accent);
+  dots(y - S(8));
+  for (int it = 0; it < IT_COUNT; ++it) {
+    g_rows[it] = {}; g_value_left[it] = {};
+    if (!ItemVisible(it)) continue;
+    if (it == IT_RESUME) { y += S(12); dots(y - S(5)); }
+    wchar_t label[128], value[160]; bool grey;
+    ItemText(it, label, value, &grey);
+    bool sel = it == g_sel;
+    ThemeFill(x, y, w, row_h, 0xb0000000 | t.panel);
+    if (sel) {
+      if (!t.highlight.rgba.empty()) {
+        ThemeFill(x, y, w, row_h, 0xe0000000 | t.accent);
+        // Repeat at the original aspect ratio instead of stretching the stripes.
+        int tile = std::max(1, row_h * t.highlight.width / t.highlight.height);
+        for (int dx = 0; dx < w; ++dx) for (int dy = 0; dy < row_h; ++dy)
+          ThemePixel(x + dx, y + dy, t.highlight.rgba[(dy * t.highlight.height / row_h) *
+                     t.highlight.width + (dx % tile) * t.highlight.width / tile]);
+      }
+      else {
+        ThemeFill(x, y, w, row_h, 0xff000000 | t.accent);
+        if (!t.flat_highlight)
+          for (int dx = 0; dx < w; dx += std::max(2, S(4)))
+            ThemeFill(x + dx, y, std::max(1, S(1)), row_h, 0x30202510);
+      }
+    }
+    uint32_t color = sel ? t.selected_text : grey ? t.muted : (t.row_text ? t.row_text : t.text);
+    ThemeText(t, t.font, label, x + pad, y - S(2), w / 2 - 2 * pad, ts, color);
+    if (*value) {
+      std::wstring v = value;
+      std::wstring prefix = sel ? L"<  " : L"";
+      std::wstring suffix = ItemRestart(it) ? L" *" : L"";
+      if (sel) suffix += L"  >";
+      auto value_width = [&](std::wstring text) {
+        if (!text.empty()) CharUpperBuffW(text.data(), DWORD(text.size()));
+        float n = 0; for (wchar_t c : text) if (auto g = Glyph(t.font, c)) n += g->advance * ts;
+        return int(std::ceil(n));
+      };
+      if (value_width(prefix + v + suffix) > w / 2 - pad) {
+        while (!v.empty() && value_width(prefix + v + L"..." + suffix) > w / 2 - pad) v.pop_back();
+        v += L"...";
+      }
+      v = prefix + v + suffix;
+      int tw = ThemeText(t, t.font, v.c_str(), x + w / 2, y - S(2), w / 2 - pad, ts, color, true);
+      if (sel) g_value_left[it] = {x + w - pad - tw - S(5), y, x + w - pad - tw + S(22), y + lh};
+    }
+    g_rows[it] = {x, y, x + w, y + lh};
+    y += lh;
+  }
+  ThemeFrame(t.panel_bottom, x - S(4), y, w + S(8), S(16));
+  dots(y + S(5));
+  if (t.dots)
+    for (int yy = panel_y - S(8); yy <= y + S(5); yy += std::max(2, S(5))) {
+      ThemeFill(x - S(4), yy, std::max(1, S(2)), std::max(1, S(2)), 0xff000000 | t.accent);
+      ThemeFill(x + w + S(2), yy, std::max(1, S(2)), std::max(1, S(2)), 0xff000000 | t.accent);
+    }
+  // Help and restart notices have separate lines so neither can overwrite the other.
+  ThemeText(t, t.font, ItemHelp(g_sel), x, y + S(15), w, ts * .78f, t.text);
+  if (RestartPending())
+    ThemeText(t, t.font, T(L"* VALE DEPOIS DE REINICIAR", L"* APPLIES AFTER RESTARTING"), x,
+              y + S(35), w, ts * .78f, t.accent, true);
+  int by = oy + S(638);
+  ThemeFill(0, by - S(8), g_menu.w, S(58), 0xd810130e);
+  auto hint = [&](const ThemeImage& icon, const wchar_t* caption, int hx, Rect& hit) {
+    int d = S(38), tw = ThemeText(t, t.font, caption, 0, 0, w, ts, t.text, false, false);
+    if (!icon.rgba.empty()) ThemeBlit(icon, hx, by, d, d);
+    else {
+      int radius = d / 2;
+      for (int iy = 0; iy < d; ++iy) for (int ix = 0; ix < d; ++ix) {
+        int dist = (ix - radius) * (ix - radius) + (iy - radius) * (iy - radius);
+        if (dist <= radius * radius && dist >= (radius - 2) * (radius - 2))
+          ThemePixel(hx + ix, by + iy, 0xff000000 | t.accent);
+      }
+      ThemeText(t, t.font, &hit == &g_hint_a ? L"A" : L"B", hx + S(6), by, d, ts, t.text);
+    }
+    ThemeText(t, t.font, caption, hx + d + S(8), by + S(8), tw + 1, ts, t.text);
+    hit = {hx, by, hx + d + S(8) + tw, by + d};
+    return hit.x1;
+  };
+  const wchar_t* ac = T(L"SELECIONAR", L"SELECT");
+  const wchar_t* bc = T(L"VOLTAR", L"BACK");
+  int aw = ThemeText(t, t.font, ac, 0, 0, w, ts, t.text, false, false);
+  int bw = ThemeText(t, t.font, bc, 0, 0, w, ts, t.text, false, false);
+  int hx = x + w - aw - bw - S(124);
+  hx = hint(t.button_a, ac, hx, g_hint_a);
+  hint(t.button_b, bc, hx + S(32), g_hint_b);
+  ThemeText(t, t.font, T(L"ENTER / CLIQUE: SELECIONAR   ESC / F1: VOLTAR", L"ENTER / CLICK: SELECT   ESC / F1: BACK"),
+            x, by + S(12), std::max(0, g_hint_a.x0 - x - S(12)), ts * .65f, t.muted);
+  g_menu.Upload(ctx);
+}
+
 void RenderMenu(ID3D11DeviceContext* ctx) {
+  if (const Theme* theme = MenuTheme()) { RenderThemedMenu(ctx, *theme); return; }
   const int w = g_menu.w, h = g_menu.h;
   const int lh = std::max(12, h / 28);
   Fonts(lh);
@@ -1150,6 +1441,29 @@ void RenderMenu(ID3D11DeviceContext* ctx) {
 
 // The FPS counter: a small box, repainted when the number changes.
 int g_fps_shown = -1;
+void RenderHint(ID3D11DeviceContext* ctx, int lh) {
+  int h = lh * 13 / 10, w = lh * 15;
+  if (!g_hint_surface.Resize(g_gpu.dev, w, h)) return;
+  if (g_hint_shown_lang == g_opt.ui_language) return;
+  g_hint_shown_lang = g_opt.ui_language;
+  g_dc = g_hint_surface.dc;
+  SelectObject(g_dc, g_hint_surface.bmp);
+  SetBkMode(g_dc, TRANSPARENT);
+  Fill(0, 0, w, h, RGB(0, 0, 0));
+  Band(0, lh / 10, w, h - lh / 10, lh / 2, RGB(30, 44, 70));
+  Fill(lh / 3, lh / 10, lh / 3 + lh / 8, h - lh / 10, RGB(250, 160, 30));
+  int x = ButtonHint(lh * 3 / 4, (h - lh) / 2, lh, L'\x25C2', RGB(90, 96, 110), L"+", nullptr);
+  x = ButtonHint(x - lh * 3 / 4, (h - lh) / 2, lh, L'\x2261', RGB(90, 96, 110), L"", nullptr);
+  Text(T(L"CONFIGURAÇÕES DO PC", L"PC SETTINGS"), x - lh / 2, 0, w - lh * 2, h, RGB(255, 255, 255), g_font_bold, DT_LEFT);
+  Text(L"F1", w - lh * 2, 0, w - lh / 2, h, RGB(170, 185, 210), g_font_small, DT_RIGHT);
+  GdiFlush();
+  for (int i = 0; i < w * h; ++i) {
+    uint32_t c = g_hint_surface.bits[i] & 0xFFFFFFu;
+    g_hint_surface.bits[i] = c ? (c | 0xE6000000u) : 0u;
+  }
+  g_hint_surface.Upload(ctx);
+}
+
 void RenderFps(ID3D11DeviceContext* ctx, int fps, int lh) {
   int w = lh * 4, h = lh;
   if (!g_fps_surface.Resize(g_gpu.dev, w, h)) return;
@@ -1322,6 +1636,7 @@ bool Compose(ID3D11DeviceContext* ctx, const Picture& pic, const BackBufferFn& b
   }
   D3D11_VIEWPORT full{0, 0, float(bw), float(bh), 0, 1};
   if (g_open) {
+    if (g_menu.w != int(bw) || g_menu.h != int(bh) || g_menu.dev != g_gpu.dev) g_dirty = true;
     if (!g_menu.Resize(g_gpu.dev, int(bw), int(bh))) return true;
     if (g_dirty) {
       RenderMenu(ctx);
@@ -1339,6 +1654,19 @@ bool Compose(ID3D11DeviceContext* ctx, const Picture& pic, const BackBufferFn& b
       D3D11_VIEWPORT vp{float(lh / 2), float(lh / 2), float(g_fps_surface.w), float(g_fps_surface.h), 0, 1};
       DrawQuad(ctx, rtv, vp, g_gpu.ps_overlay, g_fps_surface.srv, g_gpu.point, true);
     }
+  }
+  if (HintVisible()) {
+    int lh = std::max(14, int(bh) / 30);
+    Fonts(lh);
+    RenderHint(ctx, lh);
+    if (g_hint_surface.srv) {
+      float x = float(bw) - float(g_hint_surface.w) - float(lh), y = float(lh) * 0.6f;
+      D3D11_VIEWPORT vp{x, y, float(g_hint_surface.w), float(g_hint_surface.h), 0, 1};
+      DrawQuad(ctx, rtv, vp, g_gpu.ps_overlay, g_hint_surface.srv, g_gpu.point, true);
+      g_hint_rect = {int(x), int(y), int(x) + g_hint_surface.w, int(y) + g_hint_surface.h};
+    }
+  } else {
+    g_hint_rect = {0, 0, 0, 0};
   }
   if (!g_open && !g_capture_tag.empty()) {
     Capture(ctx, rtv, g_capture_tag);
@@ -1530,6 +1858,7 @@ void MenuLoop(ID3D11Device* dev, ID3D11DeviceContext* ctx, IDXGISwapChain1* swap
 
 void Configure(const GameInfo& info, bool sdk_flags) {
   g_info = info;
+  g_info.effect_count = info.effects ? Clampi(info.effect_count, 0, kMaxEffects) : 0;
   const char* e = std::getenv("PCS_OPTIONS");
   g_use_ini = !(e && *e == '0');
   GetModuleFileNameW(nullptr, g_ini, MAX_PATH);
@@ -1553,15 +1882,41 @@ void Configure(const GameInfo& info, bool sdk_flags) {
   g_opt.volume = Clampi(IniGet(L"volume", 100), 0, 100);
   g_opt.ui_language = Clampi(IniGet(L"idioma_menu", 0), 0, 1);
   g_opt.show_fps = Clampi(IniGet(L"mostrar_fps", 0), 0, 1);
+  g_hint_enabled = IniGet(L"botao_menu", 1) != 0;
   // Test runs: environment wins over the ini.
   if (info.internal_resolution) g_opt.scale = Clampi(EnvInt("PCS_RESOLUTION", g_opt.scale), 0, kNumRes - 1);
   g_opt.vsync = EnvInt("PCS_VSYNC", g_opt.vsync) != 0;
-  if (int fps = EnvInt("PCS_FPS", -2); fps >= -1) g_opt.fps = fps;
   if (!info.real_time && !info.unlocked_fps && g_opt.fps != 30) g_opt.fps = 60;
+  if (int fps = EnvInt("PCS_FPS", -2); fps >= -1) g_opt.fps = fps;  // tests: any rate, any game
   g_opt.aa = EnvInt("PCS_FXAA", g_opt.aa) != 0;
   g_opt.aniso = EnvInt("PCS_ANISO", g_opt.aniso);
   g_opt.show_fps = EnvInt("PCS_SHOW_FPS", g_opt.show_fps) != 0;
   g_opt.display = Clampi(EnvInt("PCS_DISPLAY", g_opt.display), 0, 2);
+  g_opt.monitor = Clampi(EnvInt("PCS_MONITOR", g_opt.monitor), 0, 15);
+  uint32_t effects = 0xff;
+  for (int i = 0; i < g_info.effect_count; ++i) {
+    if (!IniGet(EffectKey(i).c_str(), g_info.effects[i].default_on ? 1 : 0)) effects &= ~(1u << i);
+  }
+  // A later DLL configuration inherits the already-published live state.
+  if (!sdk_flags) ReadEffects(effects);
+  if (const char* fx = std::getenv("PCS_FX"); fx && *fx) {
+    std::string list(fx);
+    size_t start = 0;
+    while (start < list.size()) {
+      size_t end = list.find(',', start);
+      std::string entry = list.substr(start, end - start);
+      for (int i = 0; i < g_info.effect_count; ++i) {
+        std::string key = std::string(g_info.effects[i].key) + "=";
+        if (entry == key + "0") effects &= ~(1u << i);
+        else if (entry == key + "1") effects |= 1u << i;
+      }
+      if (end == std::string::npos) break;
+      start = end + 1;
+    }
+  }
+  g_effect_mask = effects;
+  PublishEffects();
+  g_effect_remote = !sdk_flags;
   if (const char* api = std::getenv("PCS_API"); api && *api) g_opt.api = *api == 'v' || *api == 'V' || *api == '1';
   if (int lang = EnvInt("PCS_LANGUAGE", -1); lang == 0 || LanguageListed(lang)) g_opt.language = lang;
   // The game-menu entry is published for the other modules of the process (env wins).
@@ -1623,8 +1978,25 @@ const Settings& Get() { return g_opt; }
 float ResolutionScale() {
   if (!g_configured || !g_info.internal_resolution) return 1.0f;
   uint32_t w, h;
-  InternalSize(g_boot.scale, w, h);
+  InternalSize(g_opt.scale, w, h);  // live: the renderers re-read it every frame
   return std::clamp(float(h) / float(g_info.native_height), 0.5f, 6.0f);
+}
+
+bool EffectEnabled(int index) {
+  if (index < 0 || index >= kMaxEffects) return true;
+  if (g_effect_remote.load()) {
+    int64_t now = SteadyMs();
+    if (now - g_effect_checked.load() >= 250 && !g_effect_reading.test_and_set()) {
+      // Recheck under the nonblocking guard: concurrent render threads share one poll.
+      if (now - g_effect_checked.load() >= 250) {
+        uint32_t mask;
+        if (ReadEffects(mask)) g_effect_mask = mask;
+        g_effect_checked = SteadyMs();
+      }
+      g_effect_reading.clear();
+    }
+  }
+  return (g_effect_mask.load() & (1u << index)) != 0;
 }
 
 int Anisotropy() { return g_opt.aniso; }
@@ -1691,6 +2063,8 @@ double GuestRefreshHz() {
     double local = 60.0;
     if ((g_info.real_time || g_info.unlocked_fps) && !g_open) {
       int fps = TargetFps();
+      // Keep the compatibility display interrupt from imposing 60/500 Hz in uncapped mode.
+      // This is an interrupt service rate, not a promise of rendered frames per second.
       local = fps == 0 ? 1000.0 : fps < 60 ? 60.0 : double(fps);
     }
     char text[32];
@@ -1710,6 +2084,11 @@ double GuestRefreshHz() {
 bool MenuOpen() { return g_open; }
 
 void RequestMenu() { g_request = true; }
+
+void SetGameMenus(bool on_menus) {
+  if (on_menus) g_game_menus_until = SteadyMs() + 500;
+  else g_game_menus_until = 0;
+}
 
 bool GameMenuEntry() {
   static const bool on = [] {

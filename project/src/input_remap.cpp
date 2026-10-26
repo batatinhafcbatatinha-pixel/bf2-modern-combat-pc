@@ -357,6 +357,7 @@ REX_HOOK_RAW(sub_8246FE70) {
       rex::memory::store_and_swap<uint16_t>(s+4,rex::memory::load_and_swap<uint16_t>(s+4)|held);
     }
   }
+  pcs::SetGameMenus(!in_game);  // the "PC settings" button over the game's menus
   MouseUpdate(in_game);
   bool gameplay = REXCVAR_GET(bf2_modern_controls) && in_game;
   if (LogEnabled()) {

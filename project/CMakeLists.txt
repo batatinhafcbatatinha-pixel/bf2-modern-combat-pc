@@ -15,7 +15,10 @@ set(BF2MC_SOURCES
     src/main.cpp
     src/hooks.cpp
     src/input_remap.cpp
+    src/menu_hooks.cpp
+    src/apt_menu.cpp
     src/pc_settings.cpp
+    src/pc_theme.cpp
     src/native_gpu/gpu_hooks.cpp
     src/native_gpu/renderer.cpp
     src/native_gpu/textures.cpp
@@ -56,3 +59,4 @@ if(WIN32 AND EXISTS "${DXVK_DIR}/x64/d3d11.dll")
                     "$<TARGET_FILE_DIR:bf2mc>/vulkan/LICENSE.dxvk.txt")
     endif()
 endif()
+

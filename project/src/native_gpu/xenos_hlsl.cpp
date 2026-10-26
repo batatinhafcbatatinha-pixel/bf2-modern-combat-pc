@@ -11,6 +11,7 @@
 // scalar result; predicated instructions do nothing (also no ps update) when the check fails.
 
 #include "xenos_hlsl.h"
+#include "depth_precision.h"
 
 #include <algorithm>
 #include <cmath>
@@ -1162,6 +1163,7 @@ std::string Translator::Run() {
 
   std::ostringstream h;
   h << kCommonHlsl;
+  if (pixel_ && opt_.depth20e4) h << kDepthPrecisionHlsl;
   if (!pixel_) h << "ByteAddressBuffer xvmem : register(t0);\n";
   for (uint32_t i = 0; i < info_.textures.size(); ++i) {
     const TextureBinding& t = info_.textures[i];
@@ -1192,7 +1194,7 @@ struct XPSOut {
   float4 c2 : SV_Target2;
   float4 c3 : SV_Target3;
 )";
-    if (info_.writes_depth) h << "  float depth : SV_Depth;\n";
+    if (info_.writes_depth || opt_.depth20e4) h << "  float depth : SV_Depth;\n";
     h << R"(};
 XPSOut main(XVSOut xi, bool xface : SV_IsFrontFace) {
   float4 oc0 = float4(0.0, 0.0, 0.0, 0.0), oc1 = oc0, oc2 = oc0, oc3 = oc0;
@@ -1259,7 +1261,8 @@ XPSOut main(XVSOut xi, bool xface : SV_IsFrontFace) {
   xr.c2 = oc2 * xsys[4].z;
   xr.c3 = oc3 * xsys[4].w;
 )";
-    if (info_.writes_depth) h << "  xr.depth = saturate(odepth);\n";
+    if (opt_.depth20e4) h << "  xr.depth = xdepth20e4(odepth);\n";
+    else if (info_.writes_depth) h << "  xr.depth = saturate(odepth);\n";
     h << "  return xr;\n}\n";
   }
   info_.ok = err_.empty();

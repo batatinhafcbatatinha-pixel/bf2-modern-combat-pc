@@ -3,6 +3,8 @@
 
 #include "pc_settings.h"
 
+const pcs::Theme* PcBf2Theme();
+
 inline pcs::GameInfo PcGameInfo() {
   // The USA disc ships one language (8/Localisation): no language choice.
   pcs::GameInfo info;
@@ -10,7 +12,9 @@ inline pcs::GameInfo PcGameInfo() {
   info.window_title = "Battlefield 2: Modern Combat";
   info.ini_name = L"bf2mc-pc.ini";
   info.internal_resolution = true;
-  // Experimental opt-in; high-rate simulation timing still needs gameplay validation.
+  // Requested uncapped mode; physics/audio above 60 Hz still need gameplay validation.
   info.unlocked_fps = true;
+  info.theme = PcBf2Theme();
   return info;
 }
+
