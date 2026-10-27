@@ -19,6 +19,7 @@ set(BF2MC_SOURCES
     src/apt_menu.cpp
     src/pc_settings.cpp
     src/pc_theme.cpp
+    src/post_effects.cpp
     src/native_gpu/gpu_hooks.cpp
     src/native_gpu/renderer.cpp
     src/native_gpu/textures.cpp
