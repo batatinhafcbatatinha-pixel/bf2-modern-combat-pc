@@ -1,3 +1,4 @@
+#include "../platform/native_byteorder.h"
 // Layout of the XMA decoder context shared between the game and bf2audio::XmaEngine: 16
 // big-endian dwords of bit fields (bit positions are LSB-first within each dword).
 #pragma once
@@ -7,8 +8,8 @@
 
 namespace bf2audio {
 
-inline uint32_t XmaBe32(const uint8_t* p) { return _byteswap_ulong(*reinterpret_cast<const uint32_t*>(p)); }
-inline void XmaStoreBe32(uint8_t* p, uint32_t v) { *reinterpret_cast<uint32_t*>(p) = _byteswap_ulong(v); }
+inline uint32_t XmaBe32(const uint8_t* p) { return native_host::ByteSwap32(*reinterpret_cast<const uint32_t*>(p)); }
+inline void XmaStoreBe32(uint8_t* p, uint32_t v) { *reinterpret_cast<uint32_t*>(p) = native_host::ByteSwap32(v); }
 
 struct Field {
   uint8_t word, lo, bits;

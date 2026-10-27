@@ -1,3 +1,4 @@
+#include "../platform/native_byteorder.h"
 #include "audio_system.h"
 
 #include <algorithm>
@@ -28,7 +29,7 @@ NativeAudioSystem* g_system = nullptr;
 constexpr uint32_t kTargetQueuedFrames = 6;
 
 inline float BeFloat(const uint8_t* p) {
-  uint32_t v = _byteswap_ulong(*reinterpret_cast<const uint32_t*>(p));
+  uint32_t v = native_host::ByteSwap32(*reinterpret_cast<const uint32_t*>(p));
   float f;
   std::memcpy(&f, &v, 4);
   return f;

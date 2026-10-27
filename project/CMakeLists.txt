@@ -37,8 +37,15 @@ endif()
 
 rexglue_setup_target(bf2mc)
 
+# Line tables for the hand-written sources (profiling); the generated code stays as configured.
+set_source_files_properties(src/native_gpu/renderer.cpp src/native_gpu/textures.cpp src/native_gpu/gpu_hooks.cpp
+    src/pc_settings.cpp PROPERTIES COMPILE_OPTIONS "-gcodeview;-gline-tables-only")
+
 # Native D3D11 renderer (src/native_gpu): no GPU emulation plugin.
-target_link_libraries(bf2mc PRIVATE rex::xxhash d3d11 dxgi d3dcompiler winmm)
+target_link_libraries(bf2mc PRIVATE rex::xxhash)
+if(WIN32)
+    target_link_libraries(bf2mc PRIVATE d3d11 dxgi d3dcompiler winmm)
+endif()
 
 # Native audio (src/native_audio): XMA via the SDK's FFmpeg build; public headers (LGPL 2.1) in
 # third_party/ffmpeg.
@@ -61,3 +68,13 @@ if(WIN32 AND EXISTS "${DXVK_DIR}/x64/d3d11.dll")
     endif()
 endif()
 
+
+# Native HLSL compiler for Linux (no Windows compiler DLL).
+include(src/platform/native_shader_compiler.cmake)
+if(TARGET native_shader_compiler)
+    foreach(_native_target IN ITEMS bf2mc)
+        if(TARGET ${_native_target})
+            target_link_libraries(${_native_target} PRIVATE native_shader_compiler)
+        endif()
+    endforeach()
+endif()

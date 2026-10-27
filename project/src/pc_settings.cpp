@@ -1,3 +1,4 @@
+#include "platform/native_host_window.h"
 // In-game PC settings for the Xbox 360 ports; see pc_settings.h.
 //
 // Text is drawn with GDI (Segoe UI, so accents and arrows render) into a DIB that becomes a
@@ -6,7 +7,7 @@
 #define NOMINMAX
 #include <windows.h>
 #include <d3d11.h>
-#include <d3dcompiler.h>
+#include "platform/native_shader_compiler.h"
 #include <dxgi1_6.h>
 
 #include "pc_settings.h"
@@ -302,7 +303,11 @@ int EnvInt(const char* name, int def) {
 
 struct Monitor {
   RECT rc, work;
-  wchar_t device[CCHDEVICENAME];
+  wchar_t device[32];
+#ifndef _WIN32
+  SDL_DisplayID id = 0;
+  int sdk_index = 0;
+#endif
   wchar_t name[96];
 };
 std::vector<Monitor> g_mon;
@@ -311,6 +316,7 @@ std::vector<std::wstring> g_gpu_name;
 std::vector<int> g_gpu_index;
 bool g_gpus_listed = false;
 
+#ifdef _WIN32
 BOOL CALLBACK MonitorCb(HMONITOR h, HDC, LPRECT, LPARAM) {
   MONITORINFOEXW mi{};
   mi.cbSize = sizeof(mi);
@@ -334,12 +340,36 @@ BOOL CALLBACK MonitorCb(HMONITOR h, HDC, LPRECT, LPARAM) {
   return TRUE;
 }
 
+#endif
+
 void MonitorsRefresh() {
   g_mon.clear();
+#ifdef _WIN32
   EnumDisplayMonitors(nullptr, nullptr, MonitorCb, 0);
+#else
+  int count = 0;
+  SDL_DisplayID* displays = SDL_GetDisplays(&count);
+  for (int i = 0; displays && i < count; ++i) {
+    SDL_Rect rect{}, work{};
+    if (!SDL_GetDisplayBounds(displays[i], &rect)) continue;
+    if (!SDL_GetDisplayUsableBounds(displays[i], &work)) work = rect;
+    Monitor m{};
+    m.id = displays[i];
+    m.sdk_index = i;
+    m.rc = {rect.x, rect.y, rect.x + rect.w, rect.y + rect.h};
+    m.work = {work.x, work.y, work.x + work.w, work.y + work.h};
+    swprintf(m.name, 96, L"%d (%dx%d)", i + 1, rect.w, rect.h);
+    g_mon.push_back(m);
+  }
+  SDL_free(displays);
+#endif
   if (g_mon.empty()) {
     Monitor m{};
+#ifdef _WIN32
     SetRect(&m.rc, 0, 0, GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN));
+#else
+    m.rc = {0, 0, 1280, 720};
+#endif
     m.work = m.rc;
     wcscpy(m.name, L"?");
     g_mon.push_back(m);
@@ -352,10 +382,15 @@ const Monitor& MonitorCurrent() {
 }
 
 int MonitorCurrentHz() {
+#ifdef _WIN32
   DEVMODEW dm{};
   dm.dmSize = sizeof(dm);
   if (EnumDisplaySettingsW(MonitorCurrent().device, ENUM_CURRENT_SETTINGS, &dm) && dm.dmDisplayFrequency > 1)
     return int(dm.dmDisplayFrequency);
+#else
+  if (const SDL_DisplayMode* mode = SDL_GetCurrentDisplayMode(MonitorCurrent().id))
+    if (mode->refresh_rate > 1) return int(mode->refresh_rate + 0.5f);
+#endif
   return 60;
 }
 
@@ -382,6 +417,7 @@ int TargetFps() {
 void RatesRefresh() {
   const Monitor& m = MonitorCurrent();
   g_rates.clear();
+#ifdef _WIN32
   DEVMODEW dm{};
   dm.dmSize = sizeof(dm);
   for (DWORD i = 0; EnumDisplaySettingsW(m.device, i, &dm); ++i) {
@@ -391,6 +427,17 @@ void RatesRefresh() {
     int hz = int(dm.dmDisplayFrequency);
     if (std::find(g_rates.begin(), g_rates.end(), hz) == g_rates.end()) g_rates.push_back(hz);
   }
+#else
+  int count = 0;
+  SDL_DisplayMode** modes = SDL_GetFullscreenDisplayModes(m.id, &count);
+  for (int i = 0; modes && i < count; ++i) {
+    const auto* mode = modes[i];
+    if (mode->w != m.rc.right - m.rc.left || mode->h != m.rc.bottom - m.rc.top || mode->refresh_rate <= 1) continue;
+    const int hz = int(mode->refresh_rate + 0.5f);
+    if (std::find(g_rates.begin(), g_rates.end(), hz) == g_rates.end()) g_rates.push_back(hz);
+  }
+  SDL_free(modes);
+#endif
   std::sort(g_rates.begin(), g_rates.end());
 }
 
@@ -406,17 +453,28 @@ struct GpuApi {
 };
 
 bool VulkanInstalled(wchar_t* dir) {
+#ifndef _WIN32
+  if (dir) *dir = 0;
+  return true;  // DXVK native is a required linked dependency.
+#else
   GetModuleFileNameW(nullptr, dir, MAX_PATH);
   wchar_t* slash = wcsrchr(dir, L'\\');
   wcscpy(slash ? slash + 1 : dir, L"vulkan\\");
   wchar_t probe[MAX_PATH];
   swprintf(probe, MAX_PATH, L"%lsd3d11.dll", dir);
   return GetFileAttributesW(probe) != INVALID_FILE_ATTRIBUTES;
+#endif
 }
 
 const GpuApi& Api() {
   static const GpuApi api = [] {
     GpuApi a;
+#ifndef _WIN32
+    // All handles passed to DXVK here are SDL3 windows.
+    setenv("DXVK_WSI_DRIVER", "SDL3", 1);
+    a.vulkan = true;
+    return a;
+#else
     if (g_boot.api != 1) return a;
     wchar_t dir[MAX_PATH], path[MAX_PATH];
     if (!VulkanInstalled(dir)) {
@@ -438,6 +496,7 @@ const GpuApi& Api() {
     a.device = device;
     REXLOG_INFO("[pc] graphics API: Vulkan (DXVK)");
     return a;
+#endif
   }();
   return api;
 }
@@ -598,7 +657,11 @@ void Change(int it, int d) {
       break;
     case IT_API: {
       wchar_t dir[MAX_PATH];
+#ifdef _WIN32
       if (g_opt.api || VulkanInstalled(dir)) g_opt.api = !g_opt.api;
+#else
+      g_opt.api = 1;
+#endif
       break;
     }
     case IT_SHOW_FPS: g_opt.show_fps = !g_opt.show_fps; break;
@@ -834,6 +897,7 @@ void ApplyWindowMode(int display, int monitor_index) {
   if (!g_window || !g_hwnd) return;
   MonitorsRefresh();
   const Monitor& m = g_mon[size_t(monitor_index) < g_mon.size() ? size_t(monitor_index) : 0];
+#ifdef _WIN32
   HMONITOR cur = MonitorFromWindow(g_hwnd, MONITOR_DEFAULTTONEAREST);
   MONITORINFOEXW mi{};
   mi.cbSize = sizeof(mi);
@@ -866,6 +930,23 @@ void ApplyWindowMode(int display, int monitor_index) {
     }
     if (!g_window->IsFullscreen()) g_window->SetFullscreen(true);
   }
+#else
+  auto* window = reinterpret_cast<SDL_Window*>(g_hwnd);
+  if (g_window->IsFullscreen()) g_window->SetFullscreen(false);
+  g_window->SetMonitor(m.sdk_index);
+  if (display == 0) {
+    uint32_t width = 0, height = 0;
+    WindowSize(g_opt.scale, width, height);
+    const float density = std::max(SDL_GetWindowPixelDensity(window), 1.0f);
+    float scale = std::min({1.0f, float(m.work.right - m.work.left) * 0.9f / width,
+                          float(m.work.bottom - m.work.top) * 0.9f / height});
+    const int w = std::max(1, int(width * scale / density));
+    const int h = std::max(1, int(height * scale / density));
+    g_window->SetDesiredLogicalSize(w, h);
+    SDL_SetWindowPosition(window, m.work.left + (m.work.right - m.work.left - w) / 2,
+                          m.work.top + (m.work.bottom - m.work.top - h) / 2);
+  } else g_window->SetFullscreen(true);
+#endif
   g_window->SetCursorVisibility(display != 0 && !g_open ? rex::ui::Window::CursorVisibility::kAutoHidden
                                                         : rex::ui::Window::CursorVisibility::kVisible);
 }
@@ -1038,8 +1119,12 @@ bool GpuSetup(ID3D11Device* dev) {
   g_gpu.dev = dev;
   g_gpu.failed = true;
   static CompileFn compile = [] {
+#ifdef _WIN32
     HMODULE m = LoadLibraryW(L"d3dcompiler_47.dll");
     return m ? reinterpret_cast<CompileFn>(GetProcAddress(m, "D3DCompile")) : nullptr;
+#else
+    return &D3DCompile;
+#endif
   }();
   if (!compile) return false;
   auto blob = [&](const char* entry, const char* target) -> ID3DBlob* {
@@ -2168,7 +2253,7 @@ void Attach() {
   if (!runtime || !runtime->display_window()) return;
   g_attached = true;
   g_window = runtime->display_window();
-  g_hwnd = static_cast<HWND>(g_window->GetNativeWindowHandle());
+  g_hwnd = static_cast<HWND>(native_host::WindowHandle(g_window));
   g_fps_log = EnvInt("PCS_FPS_LOG", 0) != 0;
   MonitorsRefresh();
   RatesRefresh();
@@ -2342,6 +2427,9 @@ void Configure(const GameInfo& info, bool sdk_flags) {
   // The game-menu entry is published for the other modules of the process (env wins).
   if (!GetEnvironmentVariableA("PCS_GAME_MENU", nullptr, 0))
     SetEnvironmentVariableA("PCS_GAME_MENU", IniGet(L"menu_no_jogo", 1) ? "1" : "0");
+#ifndef _WIN32
+  g_opt.api = 1;  // Linux has only the native Vulkan backend.
+#endif
   g_boot = g_opt;
   g_configured = true;
   if (!sdk_flags) return;

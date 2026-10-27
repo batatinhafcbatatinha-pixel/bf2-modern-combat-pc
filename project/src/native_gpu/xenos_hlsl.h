@@ -40,6 +40,7 @@ struct ShaderInfo {
   bool uses_memexport = false;
   uint32_t interp_written = 0;  // vertex: o0..o15 mask
   uint32_t reg_count = 0;
+  uint32_t const_count = 0;  // float constants read: c[0, const_count); 256 with relative addressing
 };
 
 struct TranslateOptions {

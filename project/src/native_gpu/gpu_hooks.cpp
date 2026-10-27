@@ -1,3 +1,4 @@
+#include "../platform/native_byteorder.h"
 // bf2mc native GPU - replacements for the GPU-facing functions of the game's static Direct3D
 // library (addresses and semantics: analysis/d3d-map.md, analysis/native-gpu.md).
 //
@@ -54,10 +55,10 @@ uint8_t* Mem() {
 uint32_t Load32(uint32_t a) {
   uint32_t v;
   std::memcpy(&v, Mem() + a + (a >= 0xE0000000u ? 0x1000u : 0u), 4);
-  return _byteswap_ulong(v);
+  return native_host::ByteSwap32(v);
 }
 void Store32(uint32_t a, uint32_t v) {
-  v = _byteswap_ulong(v);
+  v = native_host::ByteSwap32(v);
   std::memcpy(Mem() + a + (a >= 0xE0000000u ? 0x1000u : 0u), &v, 4);
 }
 
@@ -214,6 +215,7 @@ REX_HOOK_RAW(sub_8248AB00) {
   imm.declaration_id = Load32(declaration + 32);
   const uint8_t* src = Mem() + start + (start >= 0xE0000000u ? 0x1000u : 0u);
   imm.code.assign(src, src + size);
+  ++imm.generation;
   static std::atomic<int> logs{0};
   if (logs.fetch_add(1) < 8)
     REXLOG_INFO("bf2native: vertex shader {:08X} loaded through the command buffer ({} bytes at {:08X})", shader,

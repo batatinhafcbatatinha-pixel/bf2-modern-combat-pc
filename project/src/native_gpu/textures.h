@@ -58,6 +58,12 @@ DXGI_FORMAT HostTextureFormat(uint32_t guest_format, bool is_signed);
 // unsupported formats / empty textures.
 bool DecodeTexture(const uint8_t* physical_membase, const TexFetch& fetch, HostTexture& out);
 
+// Guest physical memory the texture occupies: base level and, if any, the mip chain.
+struct TextureMemory {
+  uint32_t base = 0, base_size = 0, mip = 0, mip_size = 0;
+};
+TextureMemory TextureMemoryRanges(const TexFetch& fetch);
+
 // Hash of the guest memory the texture occupies (to detect CPU updates).
 uint64_t HashTextureMemory(const uint8_t* physical_membase, const TexFetch& fetch);
 

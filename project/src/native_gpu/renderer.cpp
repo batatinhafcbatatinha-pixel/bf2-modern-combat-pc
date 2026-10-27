@@ -1,3 +1,5 @@
+#include "../platform/native_byteorder.h"
+#include "../platform/native_host_window.h"
 // bf2mc native GPU - host Direct3D 11 renderer (interface: native_gpu.h).
 //
 // Called from the guest D3D hooks (gpu_hooks.cpp) after the original function has done its CPU-side
@@ -24,9 +26,9 @@
 
 #include <d3d11_1.h>
 #include <d3d11sdklayers.h>
-#include <d3dcompiler.h>
+#include "../platform/native_shader_compiler.h"
 #include <dxgi1_2.h>
-#include <wrl/client.h>
+#include "../platform/native_com_ptr.h"
 
 #include "native_gpu.h"
 #include "pc_game_info.h"
@@ -36,6 +38,7 @@
 #include "shader_compile.h"
 #include "depth_precision.h"
 #include "xenos_hlsl.h"
+#include "write_watch.h"
 
 #include <rex/logging.h>
 #include <rex/system/kernel_state.h>
@@ -79,8 +82,12 @@ struct PerfScope {
     if (!Enabled() || frame % 120) return;
     REXLOG_INFO("bf2perf: frame {} draw {:.3f} mirror {:.3f} texture {:.3f} late {:.3f} constants {:.3f} shader {:.3f} resolve {:.3f} ms/frame; constant-update calls {}", frame, ms[0]/120, ms[1]/120, ms[2]/120, ms[3]/120, ms[4]/120, ms[5]/120, ms[6]/120, calls[4]);
     REXLOG_INFO("bf2detail: frame {} texture_hash {:.3f} decode {:.3f} upload {:.3f} prepare {:.3f} bindings {:.3f} pipeline {:.3f} ms/frame; decoded {} textures/120frames", frame, ms[7]/120, ms[8]/120, ms[9]/120, ms[10]/120, ms[11]/120, ms[12]/120, calls[8]);
+    REXLOG_INFO("bf2count: frame {} mirror hashes first {} redraw {} force {} ({} MB) pool {} MB, textures hashed {}, write callbacks {}, unchanged guest constants {}, shader lookups by hash vs {} ps {}", frame, counters[0]/120, counters[1]/120, counters[2]/120, (counters[0]+counters[1]+counters[2])*16/1024/120, counters[3]/120/1048576, counters[4]/120, counters[5]/120, counters[6]/120, (counters[7] & 0xFFFFFFFF)/120, (counters[7] >> 32)/120);
     for (int i=0;i<13;++i) { ms[i]=0; calls[i]=0; }
+    for (auto& c : counters) c = 0;
   }
+  static void Count(int i, uint64_t n = 1) { if (Enabled()) counters[i] += n; }
+  static inline uint64_t counters[8]{};
 };
 
 constexpr uint32_t kPhysicalSize = 0x20000000u;
@@ -98,12 +105,12 @@ auto* Mem() { return rex::system::kernel_state()->memory(); }
 inline uint32_t Be32(const uint8_t* p) {
   uint32_t v;
   std::memcpy(&v, p, 4);
-  return _byteswap_ulong(v);
+  return native_host::ByteSwap32(v);
 }
 inline uint16_t Be16(const uint8_t* p) {
   uint16_t v;
   std::memcpy(&v, p, 2);
-  return _byteswap_ushort(v);
+  return native_host::ByteSwap16(v);
 }
 inline uint8_t* Virt(uint32_t a) { return Mem()->TranslateVirtual(a); }
 inline uint32_t LoadV(uint32_t a) { return Be32(Virt(a)); }
@@ -293,6 +300,9 @@ struct HostTex {
   bool failed = false;
   uint32_t levels = 1;
   TexFetch fetch;
+  uint32_t changed_frame = 0;  // last frame its memory was found different
+  bool watched = false;        // write-protected since watch_stamp (see WriteWatch)
+  uint32_t watch_stamp = 0;
 };
 
 struct VsEntry {
@@ -315,6 +325,8 @@ struct ChunkState {
   uint32_t captures = 0;             // uploads recorded in used_frame
   uint32_t pool_offset = UINT32_MAX; // pool copy of the single capture, if any
   bool valid = false;
+  bool watched = false;              // write-protected since watch_stamp (see WriteWatch)
+  uint32_t watch_stamp = 0;
 };
 
 struct Targets {
@@ -385,6 +397,7 @@ class Renderer {
   ComPtr<ID3D11DeviceContext> ctx_;  // deferred: records the guest frame
   bool buggy_deferred_update_ = false;  // runtime-emulated command lists (UpdateSubresource box bug)
   std::vector<uint64_t> frame_textures_;  // texture cache keys sampled this frame
+  std::vector<bool> texture_hash_verify_;  // per texture_hash_inputs_: hashed only to verify the watch
   ParallelJobs texture_hash_jobs_;
   std::vector<HostTex*> texture_hash_inputs_;
   std::vector<uint64_t> texture_hash_results_;
@@ -395,6 +408,13 @@ class Renderer {
   ComPtr<ID3D11Buffer> mirror_;
   ComPtr<ID3D11ShaderResourceView> mirror_srv_;
   std::vector<ChunkState> chunks_;
+  // Ranges unchanged for this many frames are write-protected instead of hashed every frame.
+  static constexpr uint32_t kWatchAfterFrames = 30;
+  WriteWatch watch_;
+  bool WatchClean(bool watched, uint32_t address, uint32_t size, uint32_t stamp) const {
+    return watched && watch_.active() && watch_.Unchanged(address, size, stamp);
+  }
+  void WatchMiss(const char* what, uint32_t address);
   // Mirror uploads are recorded as copies from pool_, whose contents (pool_cpu_) are uploaded
   // when the frame executes; frame_chunks_ lists the chunks referenced by this frame's draws.
   ComPtr<ID3D11Buffer> pool_;
@@ -407,6 +427,11 @@ class Renderer {
   struct ConstantSnapshot {
     std::vector<uint8_t> bytes;
     bool valid = false;
+    // Guest (big-endian) bytes behind `bytes`, for the float constant buffers: unchanged guest
+    // constants are recognized before byte-swapping them.
+    std::array<uint8_t, 4096> raw;
+    uint32_t raw_count = 0;  // float4 constants of `raw` the buffer holds
+    bool raw_valid = false;
   };
   ConstantSnapshot constant_snapshots_[3];
   struct PipelineCache {
@@ -421,6 +446,15 @@ class Renderer {
     CachedState<ID3D11VertexShader*> vs;
     CachedState<ID3D11GeometryShader*> gs;
     CachedState<ID3D11PixelShader*> ps;
+    CachedState<std::array<void*, 5>> targets;
+    // Shader resources and samplers per stage (0 VS, 1 PS). Binding render targets may null
+    // conflicting SRVs in the runtime, so a target change invalidates these.
+    struct StageBindings {
+      uint32_t srv_count = 0, sampler_count = 0;
+      std::array<ID3D11ShaderResourceView*, 1 + kStackedSrvBase + 16> srvs;
+      std::array<ID3D11SamplerState*, 16> samplers;
+    };
+    CachedState<StageBindings> stage[2];
     bool fixed_bindings = false;
   } pipeline_cache_;
   ComPtr<ID3D11Buffer> index_ring_;
@@ -434,6 +468,36 @@ class Renderer {
 
   std::unordered_map<uint64_t, std::unique_ptr<VsEntry>> vs_cache_;
   std::unordered_map<uint64_t, std::unique_ptr<PsEntry>> ps_cache_;
+  // Shader object -> cache entry, valid while its microcode stays write-protected (WriteWatch):
+  // spares byte-swapping and hashing the whole microcode of both shaders on every draw.
+  struct ShaderLookup {
+    uint32_t ptr = 0, bytes = 0, stamp = 0, rewrites = 0;
+    void* entry = nullptr;
+    bool watched = false;
+  };
+  std::unordered_map<uint64_t, ShaderLookup> vs_lookup_, ps_lookup_;
+  ShaderLookup* LookupShader(uint64_t key, uint32_t object, bool pixel, void*& hit);
+  // Per-frame memo of texture binding lookups (fetch constant + shader binding -> views, sampler).
+  struct BindingKey {
+    uint32_t d[6];
+    uint32_t binding, aniso;
+    bool operator==(const BindingKey& o) const { return std::memcmp(this, &o, sizeof(*this)) == 0; }
+  };
+  struct BindingKeyHash {
+    size_t operator()(const BindingKey& k) const { return size_t(XXH3_64bits(&k, sizeof(k))); }
+  };
+  struct BindingMemo {
+    ID3D11ShaderResourceView *srv, *stacked;
+    ID3D11SamplerState* sampler;
+  };
+  std::unordered_map<BindingKey, BindingMemo, BindingKeyHash> binding_memo_;
+  // The vertex shader the flush loaded through the command buffer: its lookup holds per load.
+  struct {
+    uint32_t generation = UINT32_MAX, object = 0;
+    VsEntry* entry = nullptr;
+  } imm_lookup_;
+  VsEntry* GetVertexShaderSlow(uint32_t object);
+  PsEntry* GetPixelShaderSlow(uint32_t object, uint32_t param_gen_reg, bool depth20e4);
   std::unordered_map<uint64_t, HostRT> rts_;
   std::unordered_map<uint32_t, Resolved> resolved_;
   std::unordered_map<uint64_t, HostTex> textures_;
@@ -626,6 +690,11 @@ bool Renderer::Init(HWND hwnd) {
   svd.BufferEx.Flags = D3D11_BUFFEREX_SRV_FLAG_RAW;
   dev_->CreateShaderResourceView(mirror_.Get(), &svd, &mirror_srv_);
   chunks_.resize(kChunkCount);
+  // BF2_NO_WRITE_WATCH=1: hash everything every frame (the previous behaviour), for comparison.
+  if (!std::getenv("BF2_NO_WRITE_WATCH")) {
+    if (watch_.Start()) REXLOG_INFO("bf2native: write watch on (stable textures/vertex chunks are not rehashed)");
+    else REXLOG_WARN("bf2native: write watch unavailable, hashing guest memory every frame");
+  }
   bd.ByteWidth = kPoolSize;
   if (SUCCEEDED(dev_->CreateBuffer(&bd, nullptr, &pool_))) pool_cpu_.resize(kPoolSize);
 
@@ -648,10 +717,12 @@ bool Renderer::Init(HWND hwnd) {
   ib.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
   if (FAILED(dev_->CreateBuffer(&ib, nullptr, &index_ring_))) return false;
 
-  wchar_t exe[MAX_PATH] = {};
-  GetModuleFileNameW(nullptr, exe, MAX_PATH);
-  cache_dir_ = std::filesystem::path(exe).parent_path() / "native_shader_cache";
-  out_dir_ = std::filesystem::path(exe).parent_path();
+  out_dir_ = native_host::ExecutableDirectory();
+#ifdef _WIN32
+  cache_dir_ = out_dir_ / "native_shader_cache";
+#else
+  cache_dir_ = out_dir_ / "native_shader_cache_vkd3d";
+#endif
   std::error_code ec;
   std::filesystem::create_directories(cache_dir_, ec);
 
@@ -764,13 +835,17 @@ bool Renderer::CreateUtility() {
 // D3DCompile with access violations inside the compiler turned into E_UNEXPECTED.
 HRESULT GuardedCompile(const std::string& source, const char* entry, const char* target,
                        ID3DBlob** blob, ID3DBlob** errors) {
+#ifdef _WIN32
   __try {
+#endif
     return D3DCompile(source.data(), source.size(), nullptr, nullptr, nullptr, entry, target,
                       kShaderCompileFlags, 0, blob, errors);
+#ifdef _WIN32
   } __except (GetExceptionCode() == EXCEPTION_ACCESS_VIOLATION ? EXCEPTION_EXECUTE_HANDLER
                                                                 : EXCEPTION_CONTINUE_SEARCH) {
     return E_UNEXPECTED;
   }
+#endif
 }
 
 ComPtr<ID3DBlob> Renderer::Compile(const std::string& source, const char* entry,
@@ -854,7 +929,62 @@ bool Renderer::ReadUcode(uint32_t object, bool pixel, std::vector<uint32_t>& out
   return true;
 }
 
+// Returns the lookup slot for a shader object (nullptr if it can't be cached) and sets `hit` when
+// the remembered entry is still valid. On a miss the microcode is protected before the caller
+// reads it, so any later write invalidates the slot.
+Renderer::ShaderLookup* Renderer::LookupShader(uint64_t key, uint32_t object, bool pixel, void*& hit) {
+  hit = nullptr;
+  if (!object || !watch_.active()) return nullptr;
+  uint32_t ptr = LoadV(object + (pixel ? 0x0C : 0x28));
+  uint32_t bytes = LoadV(object + (pixel ? 0x3C : 0x258));
+  if (!ptr || !bytes || bytes > 0x10000) return nullptr;
+  if (ptr >= kPhysicalSize) {
+    ptr = Mem()->GetPhysicalAddress(ptr);  // a physical view (0xA0000000...) of the microcode
+    if (ptr == UINT32_MAX || ptr + bytes > kPhysicalSize) return nullptr;  // not watchable
+  }
+  // The flush may substitute a patched copy of the immediate vertex shader (see ReadUcode).
+  if (!pixel && LoadedImmediateVertexShader().shader == object) return nullptr;
+  ShaderLookup& l = (pixel ? ps_lookup_ : vs_lookup_)[key];
+  bool same = l.ptr == ptr && l.bytes == bytes;
+  if (l.watched && same && l.entry && watch_.Unchanged(ptr, bytes, l.stamp)) {
+    hit = l.entry;
+    return &l;
+  }
+  if (l.watched && same) ++l.rewrites;
+  l.watched = false;
+  l.ptr = ptr;
+  l.bytes = bytes;
+  if (l.rewrites >= 8) return nullptr;  // microcode memory keeps changing: just hash it
+  l.stamp = watch_.Arm(ptr, bytes);
+  l.watched = true;
+  return &l;
+}
+
 VsEntry* Renderer::GetVertexShader(uint32_t object) {
+  const auto& imm = LoadedImmediateVertexShader();
+  if (object && imm.shader == object) {
+    // Same condition as ReadUcode's: the patched copy is used while its declaration is current.
+    uint32_t decl = LoadV(imm.device + dev::kVertexDeclaration);
+    if (decl == imm.declaration && LoadV(decl + 32) == imm.declaration_id) {
+      if (imm_lookup_.generation == imm.generation && imm_lookup_.object == object) return imm_lookup_.entry;
+      VsEntry* r = GetVertexShaderSlow(object);
+      imm_lookup_ = {imm.generation, object, r};
+      return r;
+    }
+  }
+  void* hit;
+  ShaderLookup* look = LookupShader(object, object, false, hit);
+  if (hit) return static_cast<VsEntry*>(hit);
+  VsEntry* r = GetVertexShaderSlow(object);
+  if (look) {
+    look->entry = r;
+    look->watched &= r != nullptr;
+  }
+  return r;
+}
+
+VsEntry* Renderer::GetVertexShaderSlow(uint32_t object) {
+  PerfScope::Count(7);
   static thread_local std::vector<uint32_t> ucode;
   if (!ReadUcode(object, false, ucode)) return nullptr;
   uint64_t key = XXH3_64bits(ucode.data(), ucode.size() * 4);
@@ -873,6 +1003,21 @@ VsEntry* Renderer::GetVertexShader(uint32_t object) {
 }
 
 PsEntry* Renderer::GetPixelShader(uint32_t object, uint32_t param_gen_reg, bool depth20e4) {
+  void* hit;
+  uint64_t key = uint64_t(object) | (uint64_t(param_gen_reg) << 32);
+  if (depth20e4) key ^= 0xD2420E4A91F3B507ull;
+  ShaderLookup* look = LookupShader(key, object, true, hit);
+  if (hit) return static_cast<PsEntry*>(hit);
+  PsEntry* r = GetPixelShaderSlow(object, param_gen_reg, depth20e4);
+  if (look) {
+    look->entry = r;
+    look->watched &= r != nullptr;
+  }
+  return r;
+}
+
+PsEntry* Renderer::GetPixelShaderSlow(uint32_t object, uint32_t param_gen_reg, bool depth20e4) {
+  PerfScope::Count(7, 1ull << 32);
   static thread_local std::vector<uint32_t> ucode;
   if (!ReadUcode(object, true, ucode)) return nullptr;
   uint64_t key = XXH3_64bits(ucode.data(), ucode.size() * 4) ^ (uint64_t(param_gen_reg) << 56) ^
@@ -1054,7 +1199,10 @@ void Renderer::BindTargets(const Targets& t, uint32_t color_mask) {
       rtvs[i] = (t.gamma[i] && t.color[i]->rtv_gamma ? t.color[i]->rtv_gamma : t.color[i]->rtv).Get();
     }
   }
-  ctx_->OMSetRenderTargets(4, rtvs, t.depth ? t.depth->dsv.Get() : nullptr);
+  ID3D11DepthStencilView* dsv = t.depth ? t.depth->dsv.Get() : nullptr;
+  if (!pipeline_cache_.targets.Changed({rtvs[0], rtvs[1], rtvs[2], rtvs[3], dsv})) return;
+  ctx_->OMSetRenderTargets(4, rtvs, dsv);
+  pipeline_cache_.stage[0].valid = pipeline_cache_.stage[1].valid = false;
 }
 
 // --- Vertex memory mirror ----------------------------------------------------------------------
@@ -1108,17 +1256,34 @@ void Renderer::SyncMirror(uint32_t address, uint32_t size, bool force) {
       s.pool_offset = UINT32_MAX;
       frame_chunks_.push_back(c);
     }
-    bool check = force || !s.valid || s.checked_frame != frame_ ||
-                 (frame_ - s.changed_frame < 3 && s.checked_draw != draw_serial_);
+    const uint32_t chunk_address = c << kChunkShift;
+    const bool clean = WatchClean(s.watched, chunk_address, 1u << kChunkShift, s.watch_stamp);
+    if (s.watched && !clean) s.watched = false;  // written (or watch off): hash from now on
+    // A protected chunk is still rehashed now and then, to catch writers that bypass the watch.
+    const bool verify = clean && s.checked_frame != frame_ && ((c + frame_) & 63) == 0;
+    bool check = force || verify ||
+                 (!clean && (!s.valid || s.checked_frame != frame_ ||
+                             (frame_ - s.changed_frame < 3 && s.checked_draw != draw_serial_)));
     bool dirty = false;
     if (check) {
+      PerfScope::Count(force ? 2 : (!s.valid || s.checked_frame != frame_) ? 0 : 1);
       uint64_t h = XXH3_64bits(phys + (size_t(c) << kChunkShift), size_t(1) << kChunkShift);
       dirty = !s.valid || h != s.hash;
       if (dirty && s.valid) s.changed_frame = frame_;
+      if (dirty && clean) WatchMiss("vertex chunk", chunk_address);
+      if (dirty) s.watched = false;
       s.hash = h;
       s.valid = true;
       s.checked_frame = frame_;
       s.checked_draw = draw_serial_;
+      if (!dirty && !s.watched && watch_.active() && frame_ - s.changed_frame >= kWatchAfterFrames) {
+        // Protect first, then confirm the contents: a write in between shows up in the hash.
+        uint32_t stamp = watch_.Arm(chunk_address, 1u << kChunkShift);
+        if (XXH3_64bits(phys + chunk_address, size_t(1) << kChunkShift) == s.hash) {
+          s.watched = true;
+          s.watch_stamp = stamp;
+        }
+      }
     }
     if (dirty) {
       if (run_start == UINT32_MAX) run_start = c;
@@ -1138,6 +1303,8 @@ void Renderer::LateSyncMirror() {
     if (no_late) continue;
     ChunkState& s = chunks_[c];
     if (s.used_frame != frame_ || s.captures > 1 || frame_ - s.changed_frame >= kLateSyncFrames) continue;
+    if (WatchClean(s.watched, c << kChunkShift, 1u << kChunkShift, s.watch_stamp)) continue;
+    s.watched = false;
     const uint8_t* src = phys + (size_t(c) << kChunkShift);
     uint64_t h = XXH3_64bits(src, size_t(1) << kChunkShift);
     if (h == s.hash) continue;
@@ -1153,6 +1320,7 @@ void Renderer::LateSyncMirror() {
     ++late;
   }
   if (pool_used_) {
+    PerfScope::Count(3, pool_used_);
     D3D11_BOX box{0, 0, 0, pool_used_, 1, 1};
     imm_->UpdateSubresource(pool_.Get(), 0, &box, pool_cpu_.data(), 0, 0);
   }
@@ -1433,6 +1601,8 @@ ID3D11ShaderResourceView* Renderer::GetTexture(const TexFetch& f, TexDim want) {
   t.dim = have;
   t.levels = levels;
   t.fetch = f;
+  t.changed_frame = frame_;
+  t.watched = false;
   if (t.srv) frame_textures_.push_back(k);
   return t.srv.Get();
 }
@@ -1655,9 +1825,16 @@ void Renderer::Draw(uint32_t device, uint32_t prim, std::vector<uint32_t>& vids,
   // DXGI R32 indices use UINT32_MAX as strip cut, matching the restart markers decoded above.
   // Keep strips on the GPU instead of expanding every triangle and uploading 3x the indices.
   const bool native_strip = prim == 0x06 || prim == 0x03;
+  // Triangle/point lists without restart markers are already host lists: no copy needed.
+  const bool native_list = (prim == 0x04 || prim == 0x01) &&
+                           std::find(vids.begin(), vids.end(), UINT32_MAX) == vids.end();
   if (native_strip) kind = prim == 0x06 ? Kind::kTris : Kind::kLines;
-  else if (!ConvertPrimitives(prim, vids, indices, kind)) return skip("primitive");
-  const auto& host_indices = native_strip ? vids : indices;
+  else if (native_list) {
+    kind = prim == 0x04 ? Kind::kTris : Kind::kPoints;
+    if (prim == 0x04) vids.resize(vids.size() / 3 * 3);
+    if (vids.empty()) return skip("primitive");
+  } else if (!ConvertPrimitives(prim, vids, indices, kind)) return skip("primitive");
+  const auto& host_indices = native_strip || native_list ? vids : indices;
   if (host_indices.size() > kIndexRingCount) return skip("too many indices");
 
   uint32_t mode = Reg(device, 0x2205);
@@ -1747,16 +1924,37 @@ void Renderer::Draw(uint32_t device, uint32_t prim, std::vector<uint32_t>& vids,
   st.xsys[14] = kind == Kind::kPoints ? 2u : kind == Kind::kLines ? 4u : 1u;
   UpdateBuffer(state_cb_.Get(), &st, sizeof(st));
 
-  static uint32_t consts[1024];
-  for (int i = 0; i < 1024; ++i) consts[i] = Be32(d + dev::kVsConstants + i * 4);
-  UpdateBuffer(vs_consts_.Get(), consts, 4096);
+  // Only the constants the shader reads are uploaded (the rest of the discarded buffer is never
+  // read), and nothing when they are the ones the buffer already holds.
+  auto upload_guest_constants = [&](ID3D11Buffer* buffer, ConstantSnapshot& snapshot, const uint8_t* src,
+                                    uint32_t count) {
+    if (frame_ == trace_frame_) count = 256;
+    if (!count) return;
+    const uint32_t bytes = count * 16;
+    if (snapshot.valid && snapshot.raw_valid && snapshot.raw_count >= count &&
+        std::memcmp(snapshot.raw.data(), src, bytes) == 0) {
+      PerfScope::Count(6);
+      return;
+    }
+    // Byte-swapped straight into the discarded buffer (the raw copy is the change detector).
+    PerfScope perf(4);
+    D3D11_MAPPED_SUBRESOURCE m;
+    snapshot.valid = snapshot.raw_valid = false;
+    if (FAILED(ctx_->Map(buffer, 0, D3D11_MAP_WRITE_DISCARD, 0, &m))) return;
+    auto* out = static_cast<uint32_t*>(m.pData);
+    for (uint32_t i = 0; i < count * 4; ++i) out[i] = Be32(src + i * 4);
+    ctx_->Unmap(buffer, 0);
+    snapshot.valid = snapshot.raw_valid = true;  // the buffer now holds exactly these constants
+    snapshot.raw_count = count;
+    std::memcpy(snapshot.raw.data(), src, bytes);
+  };
+  upload_guest_constants(vs_consts_.Get(), constant_snapshots_[0], d + dev::kVsConstants, vs->info.const_count);
   if (ps) {
-    for (int i = 0; i < 1024; ++i) consts[i] = Be32(d + dev::kPsConstants + i * 4);
-    UpdateBuffer(ps_consts_.Get(), consts, 4096);
+    upload_guest_constants(ps_consts_.Get(), constant_snapshots_[1], d + dev::kPsConstants, ps->info.const_count);
     if (frame_ == trace_frame_ && prim == 13) {
       for (int r : {0, 1, 2, 3, 20, 21, 22, 252, 253, 254, 255}) {
-        BF2_TRACE("bf2trace:   psc[{}] {} {} {} {}", r, AsFloat(consts[r * 4]), AsFloat(consts[r * 4 + 1]),
-                    AsFloat(consts[r * 4 + 2]), AsFloat(consts[r * 4 + 3]));
+        auto psc = [&](int i) { return AsFloat(Be32(d + dev::kPsConstants + i * 4)); };
+        BF2_TRACE("bf2trace:   psc[{}] {} {} {} {}", r, psc(r * 4), psc(r * 4 + 1), psc(r * 4 + 2), psc(r * 4 + 3));
       }
     }
   }
@@ -1831,6 +2029,25 @@ void Renderer::Draw(uint32_t device, uint32_t prim, std::vector<uint32_t>& vids,
     uint32_t n = std::min<uint32_t>(uint32_t(info.textures.size()), 16);
     for (uint32_t i = 0; i < n; ++i) {
       const TextureBinding& b = info.textures[i];
+      // The same fetch constant + binding resolves to the same views and sampler for the rest of
+      // the frame (until a resolve): the lookups below run once per frame for it.
+      BindingKey memo_key;
+      std::memcpy(memo_key.d, &st.xf[b.slot * 6], 24);
+      memo_key.binding = uint32_t(b.dim) | (uint32_t(b.mag) << 8) | (uint32_t(b.min) << 16) | (uint32_t(b.mip) << 24);
+      memo_key.aniso = b.aniso;
+      if (frame_ != trace_frame_) {
+        auto memo = binding_memo_.find(memo_key);
+        if (memo != binding_memo_.end()) {
+          srvs[i + 1] = memo->second.srv;
+          samplers[i] = memo->second.sampler;
+          srv_count = std::max(srv_count, 2 + i);
+          if (b.dim == TexDim::k3D) {
+            srvs[1 + kStackedSrvBase + i] = memo->second.stacked;
+            srv_count = std::max(srv_count, 2 + kStackedSrvBase + i);
+          }
+          continue;
+        }
+      }
       TexFetch f;
       std::memcpy(f.d, &st.xf[b.slot * 6], 24);
       NormalizeFetch(f);
@@ -1859,6 +2076,7 @@ void Renderer::Draw(uint32_t device, uint32_t prim, std::vector<uint32_t>& vids,
       }
       srvs[i + 1] = srv;
       samplers[i] = f.type() == 2 ? GetSampler(f, b) : linear_clamp_.Get();
+      binding_memo_[memo_key] = {srv, srvs[1 + kStackedSrvBase + i], samplers[i]};
       if (frame_ == trace_frame_ && samplers[i]) {
         D3D11_SAMPLER_DESC sd;
         samplers[i]->GetDesc(&sd);
@@ -1869,12 +2087,21 @@ void Renderer::Draw(uint32_t device, uint32_t prim, std::vector<uint32_t>& vids,
                     sd.MipLODBias, f.d[3], f.d[4], f.d[5]);
       }
     }
+    if (!pixel) srvs[0] = mirror_srv_.Get();
+    PipelineCache::StageBindings next;
+    next.srv_count = std::max(srv_count, 1u);
+    next.sampler_count = n;
+    std::copy(std::begin(srvs), std::end(srvs), next.srvs.begin());
+    std::copy(std::begin(samplers), std::end(samplers), next.samplers.begin());
+    auto& cached = pipeline_cache_.stage[pixel ? 1 : 0];
+    // Same slots as the previous draw: identical state, nothing to record. (Slots past the
+    // counts are zero in both, so whole-array comparison is exact.)
+    if (!cached.Changed(next)) return;
     if (pixel) {
-      ctx_->PSSetShaderResources(0, std::max(srv_count, 1u), srvs);
+      ctx_->PSSetShaderResources(0, next.srv_count, srvs);
       if (n) ctx_->PSSetSamplers(0, n, samplers);
     } else {
-      srvs[0] = mirror_srv_.Get();
-      ctx_->VSSetShaderResources(0, std::max(srv_count, 1u), srvs);
+      ctx_->VSSetShaderResources(0, next.srv_count, srvs);
       if (n) ctx_->VSSetSamplers(0, n, samplers);
     }
   };
@@ -2311,6 +2538,7 @@ void Renderer::Resolve(uint32_t device, uint32_t flags, uint32_t src_rect, uint3
                        float clear_z, uint32_t clear_stencil) {
   PerfScope perf(6);
   pipeline_cache_ = {};
+  binding_memo_.clear();  // resolve destinations may now back the fetches
   Targets t;
   if (!CurrentTargets(device, t)) return;
   uint32_t source = flags & 7;
@@ -2417,6 +2645,15 @@ void Renderer::Resolve(uint32_t device, uint32_t flags, uint32_t src_rect, uint3
   }
 }
 
+// A protected range changed without a write callback: something writes guest physical memory
+// without going through the guest views, so the watch can't be trusted.
+void Renderer::WatchMiss(const char* what, uint32_t address) {
+  REXLOG_WARN("bf2native: {} {:08X} changed without a write callback; write watch disabled", what, address);
+  watch_.Disable();
+  for (auto& [k, t] : textures_) t.watched = false;
+  for (auto& c : chunks_) c.watched = false;
+}
+
 // Re-uploads textures sampled this frame whose guest memory the CPU changed since they were
 // decoded (video frames, dynamic textures). Runs on the immediate context before the frame's
 // command list, so the recorded draws see the final contents.
@@ -2424,12 +2661,31 @@ void Renderer::RefreshTextures() {
   PerfScope perf(2);
   const uint8_t* phys = Mem()->physical_membase();
   texture_hash_inputs_.clear();
+  texture_hash_verify_.clear();
   for (uint64_t k : frame_textures_) {
     auto it = textures_.find(k);
     if (it == textures_.end() || !it->second.res) continue;
-    texture_hash_inputs_.push_back(&it->second);
+    HostTex& t = it->second;
+    bool clean = false;
+    if (t.watched) {
+      TextureMemory r = TextureMemoryRanges(t.fetch);
+      clean = WatchClean(true, r.base, r.base_size, t.watch_stamp) &&
+              WatchClean(true, r.mip, r.mip_size, t.watch_stamp);
+      if (!clean) t.watched = false;
+    }
+    // Protected textures are not hashed, except a rotating few that verify the watch.
+    bool verify = clean && ((k ^ (k >> 29)) + frame_) % 64 == 0;
+    if (clean && !verify) continue;
+    texture_hash_inputs_.push_back(&t);
+    texture_hash_verify_.push_back(verify);
   }
   texture_hash_results_.resize(texture_hash_inputs_.size());
+  PerfScope::Count(4, texture_hash_inputs_.size());
+  {
+    static uint64_t last_callbacks = 0;
+    PerfScope::Count(5, watch_.callbacks() - last_callbacks);
+    last_callbacks = watch_.callbacks();
+  }
   {
     PerfScope hash_perf(7);
     texture_hash_jobs_.Run(texture_hash_inputs_.size(), [&](size_t i) {
@@ -2439,7 +2695,22 @@ void Renderer::RefreshTextures() {
   for (size_t i=0;i<texture_hash_inputs_.size();++i) {
     HostTex& t = *texture_hash_inputs_[i];
     uint64_t h = texture_hash_results_[i];
-    if (h == t.mem_hash) continue;
+    if (h == t.mem_hash) {
+      if (!t.watched && watch_.active() && frame_ - t.changed_frame >= kWatchAfterFrames) {
+        // Protect first, then confirm the contents: a write in between shows up in the hash.
+        TextureMemory r = TextureMemoryRanges(t.fetch);
+        uint32_t stamp = watch_.Arm(r.base, r.base_size);
+        if (r.mip_size) watch_.Arm(r.mip, r.mip_size);
+        if (HashTextureMemory(phys, t.fetch) == t.mem_hash) {
+          t.watched = true;
+          t.watch_stamp = stamp;
+        }
+      }
+      continue;
+    }
+    if (texture_hash_verify_[i]) WatchMiss("texture", t.fetch.base_address());
+    t.watched = false;
+    t.changed_frame = frame_;
     HostTexture ht;
     PerfScope decode_perf(8);
     if (!DecodeTexture(phys, t.fetch, ht)) continue;
@@ -2716,6 +2987,7 @@ void Renderer::Swap(uint32_t device, uint32_t front_texture) {
     // Each command list must start with a WRITE_DISCARD map for every dynamic buffer.
     for (auto& snapshot : constant_snapshots_) snapshot.valid = false;
     pipeline_cache_ = {};
+    binding_memo_.clear();
     index_pos_ = kIndexRingCount;  // the next command list must start with a discarding map
   }
   if(debug_messages_) {
@@ -2854,7 +3126,9 @@ bool RendererInit(void* hwnd) {
     REXLOG_ERROR("bf2native: no valid window handle for the renderer");
     return false;
   }
+#ifdef _WIN32
   timeBeginPeriod(1);
+#endif
   auto r = std::make_unique<Renderer>();
   if (!r->Init(static_cast<HWND>(hwnd))) return false;
   g_renderer = r.release();
@@ -2878,12 +3152,20 @@ void RendererDraw(uint32_t device, uint32_t prim, int32_t base_vertex, uint32_t 
     bool restart = (mode >> 21) & 1;
     uint32_t reset = Reg(device, 0x2103) & (is32 ? 0xFFFFFFu : 0xFFFFu);
     const uint8_t* p = Virt(address + start * (is32 ? 4 : 2));
-    for (uint32_t i = 0; i < count; ++i) {
-      uint32_t v = is32 ? Be32(p + i * 4) : Be16(p + i * 2);
-      vids[i] = (restart && (v & (is32 ? 0xFFFFFFu : 0xFFFFu)) == reset)
-                    ? UINT32_MAX
-                    : uint32_t((int32_t(v) + base_vertex) & 0xFFFFFF);
-    }
+    // One branch-free loop per index size / restart mode, so the compiler can vectorize them.
+    uint32_t* out = vids.data();
+    auto convert = [&](auto load, uint32_t mask) {
+      if (restart) {
+        for (uint32_t i = 0; i < count; ++i) {
+          uint32_t v = load(i);
+          out[i] = (v & mask) == reset ? UINT32_MAX : uint32_t((v + uint32_t(base_vertex)) & 0xFFFFFF);
+        }
+      } else {
+        for (uint32_t i = 0; i < count; ++i) out[i] = uint32_t((load(i) + uint32_t(base_vertex)) & 0xFFFFFF);
+      }
+    };
+    if (is32) convert([p](uint32_t i) { return Be32(p + i * 4); }, 0xFFFFFFu);
+    else convert([p](uint32_t i) { return uint32_t(Be16(p + i * 2)); }, 0xFFFFu);
   } else {
     for (uint32_t i = 0; i < count; ++i) vids[i] = uint32_t(base_vertex) + i;
   }

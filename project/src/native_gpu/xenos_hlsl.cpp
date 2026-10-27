@@ -282,6 +282,7 @@ void Translator::EmitAlu(const uint32_t* w) {
     return (is_temp[0] && is_temp[1]) ? const_0_rel : const_1_rel;
   };
   auto const_ref = [&](uint32_t index, bool rel) -> std::string {
+    info_.const_count = rel ? 256u : std::max(info_.const_count, index + 1);
     if (!rel) return Fmt("c[%u]", index);
     if (const_a0_rel) return Fmt("c[(%u + a0) & 255]", index);
     return Fmt("c[(%u + aL) & 255]", index);

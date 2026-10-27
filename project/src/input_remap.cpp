@@ -1,3 +1,4 @@
+#include "platform/native_host_window.h"
 // bf2mc - modern controller layout (like recent Battlefield games), applied to the pad state the
 // game reads through its XInputGetState wrapper (sub_8246FE70: r3 user index, r4 XINPUT_STATE*).
 //
@@ -290,7 +291,7 @@ void MouseUpdate(bool gameplay) {
     auto* runtime = rex::Runtime::instance();
     if (!runtime || !runtime->display_window()) return;
     g_window = runtime->display_window();
-    g_hwnd = static_cast<HWND>(g_window->GetNativeWindowHandle());
+    g_hwnd = static_cast<HWND>(native_host::WindowHandle(g_window));
     g_window->app_context().CallInUIThreadDeferred(
         [] { g_window->AddInputListener(&g_mouse_listener, 10); });
   }

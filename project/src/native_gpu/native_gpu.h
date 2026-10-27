@@ -37,6 +37,7 @@ constexpr uint32_t kGpuCallbackBlock = 0x2894;  // 10388: pointer to {mask, ?, ?
 struct ImmediateVertexShader {
   uint32_t device = 0, shader = 0, declaration = 0, declaration_id = 0;
   std::vector<uint8_t> code;
+  uint32_t generation = 0;  // bumped on every load (the renderer caches its lookup per load)
 };
 inline ImmediateVertexShader& LoadedImmediateVertexShader() {
   static ImmediateVertexShader s;

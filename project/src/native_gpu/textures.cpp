@@ -540,7 +540,7 @@ bool DecodeTexture(const uint8_t* mem, const TexFetch& t, HostTexture& out) {
   return !out.subs.empty() && !out.subs[0].data.empty();
 }
 
-uint64_t HashTextureMemory(const uint8_t* mem, const TexFetch& t) {
+TextureMemory TextureMemoryRanges(const TexFetch& t) {
   const FormatDesc& f = kFormats[t.format()];
   uint32_t w = t.width(), h = t.height(), d = t.depth();
   bool is_3d = t.dimension() == 2;
@@ -559,13 +559,21 @@ uint64_t HashTextureMemory(const uint8_t* mem, const TexFetch& t) {
   }
   if (L.packed_level == 0) base_bytes = std::max(base_bytes, L.base.array_stride);
   base_bytes = std::min<uint32_t>(base_bytes, 64u << 20);
-  uint32_t base = t.base_address() & 0x1FFFFFFF;
-  uint64_t hash = XXH3_64bits(mem + base, std::min<uint32_t>(base_bytes, 0x20000000u - base));
+  TextureMemory r;
+  r.base = t.base_address() & 0x1FFFFFFF;
+  r.base_size = std::min<uint32_t>(base_bytes, 0x20000000u - r.base);
   if (levels > 1 && t.mip_address()) {
-    uint32_t mip = t.mip_address() & 0x1FFFFFFF;
-    uint32_t extent = std::min<uint32_t>(L.mips_extent, 0x20000000u - mip);
-    hash ^= XXH3_64bits(mem + mip, std::min<uint32_t>(extent, 64u << 20)) * 0x9E3779B97F4A7C15ull;
+    r.mip = t.mip_address() & 0x1FFFFFFF;
+    uint32_t extent = std::min<uint32_t>(L.mips_extent, 0x20000000u - r.mip);
+    r.mip_size = std::min<uint32_t>(extent, 64u << 20);
   }
+  return r;
+}
+
+uint64_t HashTextureMemory(const uint8_t* mem, const TexFetch& t) {
+  TextureMemory r = TextureMemoryRanges(t);
+  uint64_t hash = XXH3_64bits(mem + r.base, r.base_size);
+  if (r.mip_size) hash ^= XXH3_64bits(mem + r.mip, r.mip_size) * 0x9E3779B97F4A7C15ull;
   return hash;
 }
 

@@ -1,3 +1,4 @@
+#include "platform/native_host_window.h"
 // bf2mc - ReXGlue Recompiled Project
 //
 // Customize your app by overriding virtual hooks from rex::ReXApp.
@@ -40,7 +41,7 @@ class Bf2mcApp : public rex::ReXApp {
   void OnPostSetup() override { bf2n::NativeGpuInstallMmio(); }
 
   void OnPreLaunchModule() override {
-    bf2n::NativeGpuSetWindow(window() ? window()->GetNativeWindowHandle() : nullptr);
+    bf2n::NativeGpuSetWindow(window() ? native_host::WindowHandle(window()) : nullptr);
   }
 
   // void OnPostInitLogging() override {}

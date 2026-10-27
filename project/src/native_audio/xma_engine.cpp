@@ -1,3 +1,4 @@
+#include "../platform/native_byteorder.h"
 // Native XMA decoding. See xma_engine.h.
 //
 // Bitstream layout and the decoder's buffer semantics (packets of 2048 bytes with a 32-bit header,
@@ -495,7 +496,7 @@ struct XmaEngine::Impl {
     uint32_t n = std::min<uint32_t>(kSamplesPerFrame, uint32_t(std::max(frame->nb_samples, 0)));
     auto pcm = [](float v) {
       v = std::clamp(v, -1.0f, 1.0f) * 32767.0f;
-      return _byteswap_ushort(uint16_t(int16_t(std::lrintf(v))));
+      return native_host::ByteSwap16(uint16_t(int16_t(std::lrintf(v))));
     };
     float peak = 0.0f;
     for (uint32_t i = 0; i < n; i++) peak = std::max({peak, std::fabs(l[i]), r ? std::fabs(r[i]) : 0.0f});
