@@ -1576,8 +1576,139 @@ void RenderThemedMenu(ID3D11DeviceContext* ctx, const Theme& t) {
   g_menu.Upload(ctx);
 }
 
+// The menu surface as a 1280x720 canvas for a game's own draw function.
+class MenuCanvas final : public Canvas {
+ public:
+  MenuCanvas() {
+    s_ = std::min(g_menu.w / 1280.f, g_menu.h / 720.f);
+    ox_ = (g_menu.w - 1280.f * s_) / 2;
+    oy_ = (g_menu.h - 720.f * s_) / 2;
+  }
+  int X(float x) const { return int(std::lround(ox_ + x * s_)); }
+  int Y(float y) const { return int(std::lround(oy_ + y * s_)); }
+
+  void Fill(int x, int y, int w, int h, uint32_t argb) override {
+    int x0 = X(float(x)), y0 = Y(float(y));
+    ThemeFill(x0, y0, X(float(x + w)) - x0, Y(float(y + h)) - y0, argb);
+  }
+  void Polygon(const int* xy, int points, uint32_t argb) override {
+    if (points < 3) return;
+    std::vector<float> px(points), py(points);
+    float top = 1e9f, bottom = -1e9f;
+    for (int i = 0; i < points; ++i) {
+      px[i] = ox_ + xy[2 * i] * s_;
+      py[i] = oy_ + xy[2 * i + 1] * s_;
+      top = std::min(top, py[i]);
+      bottom = std::max(bottom, py[i]);
+    }
+    for (int y = std::max(0, int(std::floor(top))); y < std::min(g_menu.h, int(std::ceil(bottom))); ++y) {
+      float fy = y + 0.5f, left = 1e9f, right = -1e9f;
+      for (int i = 0; i < points; ++i) {
+        int j = (i + 1) % points;
+        if ((py[i] <= fy) == (py[j] <= fy)) continue;
+        float fx = px[i] + (fy - py[i]) * (px[j] - px[i]) / (py[j] - py[i]);
+        left = std::min(left, fx);
+        right = std::max(right, fx);
+      }
+      for (int x = std::max(0, int(std::lround(left))); x < std::min(g_menu.w, int(std::lround(right))); ++x)
+        ThemePixel(x, y, argb);
+    }
+  }
+  int Measure(const ThemeFont& f, const std::wstring& s, float scale, bool upper) override {
+    std::wstring str = Case(s, upper);
+    float n = 0;
+    for (wchar_t c : str) if (auto g = Glyph(f, c)) n += g->advance * scale;
+    return int(std::ceil(n));
+  }
+  int Text(const ThemeFont& f, const std::wstring& s, int x, int y, int width, float scale, uint32_t argb,
+           int align, bool upper) override {
+    std::wstring str = Case(s, upper);
+    if (Measure(f, str, scale, false) > width) {
+      while (!str.empty() && Measure(f, str + L"...", scale, false) > width) str.pop_back();
+      str += L"...";
+    }
+    int size = Measure(f, str, scale, false);
+    float pen = float(align == 1 ? x + width - size : align == 2 ? x + (width - size) / 2 : x);
+    const float k = scale * s_;
+    for (wchar_t c : str) {
+      const ThemeGlyph* g = Glyph(f, c);
+      if (!g) continue;
+      int gw = int(std::round(g->width * k)), gh = int(std::round(g->height * k));
+      int bx = X(pen) + int(std::round(g->offset_x * k)), by = Y(float(y)) + int(std::round(g->offset_y * k));
+      for (int yy = 0; yy < gh; ++yy)
+        for (int xx = 0; xx < gw; ++xx) {
+          int ax = g->x + xx * g->width / std::max(1, gw), ay = g->y + yy * g->height / std::max(1, gh);
+          if (ax >= f.atlas.width || ay >= f.atlas.height) continue;
+          uint32_t a = f.atlas.rgba[size_t(ay) * f.atlas.width + ax] >> 24;
+          a = a * (argb >> 24) / 255;
+          if (a) ThemePixel(bx + xx, by + yy, (a << 24) | (argb & 0xFFFFFF));
+        }
+      pen += g->advance * scale;
+    }
+    return size;
+  }
+  void Image(const ThemeImage& im, int x, int y, int w, int h) override {
+    int x0 = X(float(x)), y0 = Y(float(y));
+    ThemeBlit(im, x0, y0, X(float(x + w)) - x0, Y(float(y + h)) - y0);
+  }
+
+ private:
+  static std::wstring Case(const std::wstring& s, bool upper) {
+    std::wstring r = s;
+    if (upper && !r.empty()) CharUpperBuffW(r.data(), DWORD(r.size()));
+    return r;
+  }
+  float s_ = 1, ox_ = 0, oy_ = 0;
+};
+
+// A game's own screen (Theme::draw): the shared state as rows, its layout from the game.
+void RenderGameMenu(ID3D11DeviceContext* ctx, const Theme& t) {
+  std::fill(g_menu.bits, g_menu.bits + size_t(g_menu.w) * g_menu.h, 0u);
+  MenuView view;
+  view.title = T(L"CONFIGURAÇÕES DO PC", L"PC SETTINGS");
+  view.subtitle = g_info.title;
+  view.select = T(L"SELECIONAR", L"SELECT");
+  view.back = T(L"VOLTAR", L"BACK");
+  view.keys = T(L"ENTER / CLIQUE: SELECIONAR   ESC / F1: VOLTAR", L"ENTER / CLICK: SELECT   ESC / F1: BACK");
+  if (RestartPending()) view.restart_note = T(L"* VALE DEPOIS DE REINICIAR", L"* APPLIES AFTER RESTARTING");
+  for (int it = 0; it < IT_COUNT; ++it) {
+    g_rows[it] = {};
+    g_value_left[it] = {};
+    if (!ItemVisible(it)) continue;
+    MenuRow row;
+    row.id = it;
+    wchar_t label[128], value[160];
+    ItemText(it, label, value, &row.greyed);
+    row.label = label;
+    row.value = value;
+    row.selected = it == g_sel;
+    row.restart = ItemRestart(it);
+    if (it == IT_DISPLAY) row.section = T(L"VÍDEO", L"VIDEO");
+    if (it == IT_SHOW_FPS) row.section = T(L"SISTEMA", L"SYSTEM");
+    if (row.selected) {
+      view.help_title = row.label;
+      view.help = ItemHelp(it);
+    }
+    view.rows.push_back(std::move(row));
+  }
+  MenuCanvas canvas;
+  t.draw(t, canvas, view);
+  g_hint_a = g_hint_b = {};
+  for (const MenuView::Hit& h : view.hits) {
+    Rect r{canvas.X(float(h.x0)), canvas.Y(float(h.y0)), canvas.X(float(h.x1)), canvas.Y(float(h.y1))};
+    if (h.id == -1) g_hint_a = r;
+    else if (h.id == -2) g_hint_b = r;
+    else if (h.id >= 0 && h.id < IT_COUNT) (h.value_left ? g_value_left[h.id] : g_rows[h.id]) = r;
+  }
+  g_menu.Upload(ctx);
+}
+
 void RenderMenu(ID3D11DeviceContext* ctx) {
-  if (const Theme* theme = MenuTheme()) { RenderThemedMenu(ctx, *theme); return; }
+  if (const Theme* theme = MenuTheme()) {
+    if (theme->draw) RenderGameMenu(ctx, *theme);
+    else RenderThemedMenu(ctx, *theme);
+    return;
+  }
   const int w = g_menu.w, h = g_menu.h;
   const int lh = std::max(12, h / 28);
   Fonts(lh);

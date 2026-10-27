@@ -20,6 +20,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <string>
 #include <vector>
 
 struct ID3D11Device;
@@ -59,6 +60,9 @@ struct Language {
   const wchar_t* name;
 };
 
+class Canvas;
+struct MenuView;
+
 // Optional runtime-owned menu assets. Pixels are straight-alpha 0xAARRGGBB;
 // colours below are 0xRRGGBB. Metrics use a 1280x720 design canvas.
 struct ThemeGlyph {
@@ -81,6 +85,7 @@ struct Theme {
   ThemeFont font;
   ThemeFont title_font;  // optional larger face for the title (empty = font)
   ThemeImage highlight, button_a, button_b, panel_top, panel_bottom;
+  ThemeFont extra_font;  // optional third face for a game-specific draw function
   uint32_t text = 0xe5e5cf, muted = 0x929582, accent = 0xb8ba56;
   uint32_t selected_text = 0x171a10, panel = 0x20251b;
   // Optional per-part colours (0 = the colour above).
@@ -94,6 +99,38 @@ struct Theme {
   float text_scale = 1.0f;        // on top of the 1280x720 canvas scale
   float title_scale = 1.0f;       // on top of the shared 1.25x title scale
   void (*load)(Theme&) = nullptr;
+  // A whole screen in the game's own layout (else the shared themed layout above).
+  void (*draw)(const Theme&, Canvas&, MenuView&) = nullptr;
+};
+
+// What a game-specific draw function lays out: the visible lines of the menu, in order.
+struct MenuRow {
+  int id = 0;                // the item, for mouse hits
+  std::wstring label, value;
+  bool selected = false, greyed = false, restart = false;
+  std::wstring section;      // a group heading shown before this line ("" = none)
+};
+struct MenuView {
+  std::wstring title, subtitle, help_title, help, restart_note, select, back, keys;
+  std::vector<MenuRow> rows;
+  // Filled by the draw function, on the 1280x720 canvas: where each row is, where the
+  // "previous value" end of the selected value is (value_left), and the A / B hints (id -1 / -2).
+  struct Hit { int id; int x0, y0, x1, y1; bool value_left; };
+  std::vector<Hit> hits;
+};
+
+// Drawing on the menu surface, in 1280x720 canvas units (scaled to the window, centred).
+// Colours are 0xAARRGGBB. Text: `scale` multiplies the font atlas size; align 0 left, 1 right,
+// 2 centre within `width`; `upper` capitalizes. Text and Measure return the width drawn.
+class Canvas {
+ public:
+  virtual ~Canvas() = default;
+  virtual void Fill(int x, int y, int w, int h, uint32_t argb) = 0;
+  virtual void Polygon(const int* xy, int points, uint32_t argb) = 0;  // convex, x0,y0,x1,y1...
+  virtual int Text(const ThemeFont& f, const std::wstring& s, int x, int y, int width, float scale,
+                   uint32_t argb, int align, bool upper) = 0;
+  virtual int Measure(const ThemeFont& f, const std::wstring& s, float scale, bool upper) = 0;
+  virtual void Image(const ThemeImage& im, int x, int y, int w, int h) = 0;
 };
 
 // A post-process effect the game draws that the player may turn off.
