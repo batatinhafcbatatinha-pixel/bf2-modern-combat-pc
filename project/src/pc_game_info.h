@@ -12,6 +12,7 @@ inline pcs::GameInfo PcGameInfo() {
   info.window_title = "Battlefield 2: Modern Combat";
   info.ini_name = L"bf2mc-pc.ini";
   info.internal_resolution = true;
+  info.msaa = true;
   // Requested uncapped mode; physics/audio above 60 Hz still need gameplay validation.
   info.unlocked_fps = true;
   info.theme = PcBf2Theme();

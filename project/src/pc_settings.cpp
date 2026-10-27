@@ -152,6 +152,7 @@ const Translation k_tr[] = {
     {L"Stretch to the screen", {L"Estirar a la pantalla", L"Étirer à l'écran", L"Auf den Bildschirm strecken", L"Allarga allo schermo", L"Uitrekken tot het scherm", L"Растянуть на экран"}},
     {L"16:9 (original, with bars)", {L"16:9 (original, con barras)", L"16:9 (original, avec bandes)", L"16:9 (original, mit Balken)", L"16:9 (originale, con bande)", L"16:9 (origineel, met balken)", L"16:9 (оригинал, с полосами)"}},
     {L"Anti-aliasing", {L"Antialiasing", L"Anticrénelage", L"Kantenglättung", L"Antialiasing", L"Anti-aliasing", L"Сглаживание"}},
+    {L"Multisampling (MSAA)", {L"Multimuestreo (MSAA)", L"Multi-échantillonnage (MSAA)", L"Multisampling (MSAA)", L"Multicampionamento (MSAA)", L"Multisampling (MSAA)", L"Мультисэмплинг (MSAA)"}},
     {L"Anisotropic filtering", {L"Filtrado anisotrópico", L"Filtrage anisotrope", L"Anisotrope Filterung", L"Filtro anisotropico", L"Anisotrope filtering", L"Анизотропная фильтрация"}},
     {L"Game default", {L"El del juego", L"Celui du jeu", L"Wie im Spiel", L"Quello del gioco", L"Zoals in het spel", L"Как в игре"}},
     {L"Graphics API", {L"API gráfica", L"API graphique", L"Grafik-API", L"API grafica", L"Grafische API", L"Графический API"}},
@@ -176,6 +177,7 @@ const Translation k_tr[] = {
     {L"How the picture is enlarged when the internal resolution is below the screen's. AMD FSR 1.0 rebuilds edges and sharpens.", {L"Cómo se amplía la imagen cuando la resolución interna es menor que la de la pantalla. AMD FSR 1.0 reconstruye los bordes y aumenta la nitidez.", L"Façon d'agrandir l'image quand la résolution interne est inférieure à celle de l'écran. AMD FSR 1.0 reconstruit les contours et accentue la netteté.", L"Wie das Bild vergrößert wird, wenn die interne Auflösung unter der des Bildschirms liegt. AMD FSR 1.0 rekonstruiert Kanten und schärft nach.", L"Come viene ingrandita l'immagine quando la risoluzione interna è inferiore a quella dello schermo. AMD FSR 1.0 ricostruisce i bordi e aumenta la nitidezza.", L"Hoe het beeld wordt vergroot als de interne resolutie lager is dan die van het scherm. AMD FSR 1.0 herstelt randen en verscherpt.", L"Как увеличивается изображение, когда внутреннее разрешение ниже экранного. AMD FSR 1.0 восстанавливает края и повышает резкость."}},
     {L"The game is 16:9. On other screen shapes: with bars or stretched.", {L"El juego es 16:9. En pantallas de otro formato: con barras o estirado.", L"Le jeu est en 16:9. Sur d'autres formats d'écran : avec bandes ou étiré.", L"Das Spiel ist 16:9. Auf anderen Bildschirmformaten: mit Balken oder gestreckt.", L"Il gioco è in 16:9. Su schermi di altro formato: con bande o allargato.", L"Het spel is 16:9. Op schermen met een andere vorm: met balken of uitgerekt.", L"Игра в формате 16:9. На экранах другой формы: с полосами или растянуто."}},
     {L"FXAA smooths jagged edges with minimal performance cost.", {L"FXAA suaviza los bordes dentados con un coste mínimo.", L"Le FXAA adoucit les bords crénelés pour un coût minime.", L"FXAA glättet gezackte Kanten bei minimalem Leistungsbedarf.", L"FXAA ammorbidisce i bordi seghettati con un costo minimo.", L"FXAA maakt gekartelde randen glad tegen minimale kosten.", L"FXAA сглаживает зубчатые края почти без потерь производительности."}},
+    {L"Smooths the edges of the 3D scene by drawing it with several samples per pixel. Sharper than FXAA, more work for the graphics card.", {L"Suaviza los bordes de la escena 3D dibujándola con varias muestras por píxel. Más nítido que FXAA, más trabajo para la tarjeta gráfica.", L"Adoucit les bords de la scène 3D en la dessinant avec plusieurs échantillons par pixel. Plus net que le FXAA, plus de travail pour la carte graphique.", L"Glättet die Kanten der 3D-Szene mit mehreren Samples pro Pixel. Schärfer als FXAA, mehr Arbeit für die Grafikkarte.", L"Ammorbidisce i bordi della scena 3D disegnandola con più campioni per pixel. Più nitido dell'FXAA, più lavoro per la scheda video.", L"Strijkt de randen van de 3D-scène glad door meerdere samples per pixel te tekenen. Scherper dan FXAA, meer werk voor de videokaart.", L"Сглаживает края 3D-сцены, рисуя её с несколькими выборками на пиксель. Чётче, чем FXAA, но сильнее нагружает видеокарту."}},
     {L"Sharpens textures viewed at an angle, such as the ground.", {L"Hace nítidas las texturas vistas en ángulo, como el suelo.", L"Rend nettes les textures vues en biais, comme le sol.", L"Schärft schräg betrachtete Texturen, etwa den Boden.", L"Rende nitide le texture viste di sbieco, come il terreno.", L"Maakt schuin bekeken texturen scherp, zoals de grond.", L"Делает чёткими текстуры под углом, например землю."}},
     {L"Direct3D 11. Vulkan needs the vulkan folder (DXVK) next to the game.", {L"Direct3D 11. Vulkan necesita la carpeta vulkan (DXVK) junto al juego.", L"Direct3D 11. Vulkan nécessite le dossier vulkan (DXVK) à côté du jeu.", L"Direct3D 11. Vulkan braucht den Ordner vulkan (DXVK) neben dem Spiel.", L"Direct3D 11. Vulkan richiede la cartella vulkan (DXVK) accanto al gioco.", L"Direct3D 11. Vulkan heeft de map vulkan (DXVK) naast het spel nodig.", L"Direct3D 11. Для Vulkan нужна папка vulkan (DXVK) рядом с игрой."}},
     {L"DirectX 11 or Vulkan (through DXVK). If something looks wrong or stutters, try the other one. Restarts the game.", {L"DirectX 11 o Vulkan (mediante DXVK). Si algo se ve mal o da tirones, prueba la otra. Reinicia el juego.", L"DirectX 11 ou Vulkan (via DXVK). Si quelque chose s'affiche mal ou saccade, essayez l'autre. Redémarre le jeu.", L"DirectX 11 oder Vulkan (über DXVK). Wenn etwas falsch aussieht oder ruckelt, probiere die andere. Startet das Spiel neu.", L"DirectX 11 o Vulkan (tramite DXVK). Se qualcosa appare sbagliato o scatta, prova l'altra. Riavvia il gioco.", L"DirectX 11 of Vulkan (via DXVK). Als iets er verkeerd uitziet of hapert, probeer de andere. Herstart het spel.", L"DirectX 11 или Vulkan (через DXVK). Если что-то выглядит неправильно или подтормаживает, попробуйте другой. Перезапускает игру."}},
@@ -241,6 +243,7 @@ const int k_res_order[] = {7, 6, 0, 1, 2, 3, 5, 4};
 const int k_fps[] = {60, kFpsMonitor, 0, 30};
 const int k_fps_fixed[] = {60, 30};
 const int k_aniso[] = {0, 2, 4, 8, 16};
+const int k_msaa[] = {0, 2, 4, 8};
 
 int Clampi(int v, int lo, int hi) { return v < lo ? lo : v > hi ? hi : v; }
 
@@ -267,6 +270,7 @@ void SaveIni() {
   IniPut(L"ampliacao", g_opt.upscale);
   IniPut(L"fxaa", g_opt.aa);
   IniPut(L"anisotropico", g_opt.aniso);
+  IniPut(L"msaa", g_opt.msaa);
   IniPut(L"gpu", g_opt.adapter);
   IniPut(L"api_grafica", g_opt.api);
   IniPut(L"idioma", g_opt.language);
@@ -477,7 +481,7 @@ void WindowSize(int scale, uint32_t& w, uint32_t& h) {
 // ----------------------------------------------------------------------- menu state
 
 enum Item {
-  IT_DISPLAY, IT_MONITOR, IT_REFRESH, IT_VSYNC, IT_FPS, IT_SCALE, IT_UPSCALE, IT_ASPECT, IT_AA, IT_ANISO,
+  IT_DISPLAY, IT_MONITOR, IT_REFRESH, IT_VSYNC, IT_FPS, IT_SCALE, IT_UPSCALE, IT_ASPECT, IT_AA, IT_MSAA, IT_ANISO,
   IT_EFFECT0, IT_EFFECT_END = IT_EFFECT0 + kMaxEffects,
   IT_API = IT_EFFECT_END, IT_GPU, IT_SHOW_FPS, IT_UI_LANG, IT_LANG, IT_VOLUME, IT_RESUME, IT_RESTART, IT_QUIT,
   IT_COUNT
@@ -534,6 +538,7 @@ bool ItemVisible(int it) {
   if (it >= IT_EFFECT0 && it < IT_EFFECT_END) return it - IT_EFFECT0 < g_info.effect_count;
   switch (it) {
     case IT_SCALE: case IT_UPSCALE: return g_info.internal_resolution;
+    case IT_MSAA: return g_info.msaa;
     case IT_LANG: return g_info.language_count > 1;
     case IT_RESTART: return RestartPending();
   }
@@ -583,6 +588,7 @@ void Change(int it, int d) {
     case IT_UPSCALE: g_opt.upscale = !g_opt.upscale; break;
     case IT_ASPECT: g_opt.aspect = !g_opt.aspect; break;
     case IT_AA: g_opt.aa = !g_opt.aa; break;
+    case IT_MSAA: g_opt.msaa = Cycle(k_msaa, 4, g_opt.msaa, d); break;
     case IT_ANISO: g_opt.aniso = Cycle(k_aniso, 5, g_opt.aniso, d); break;
     case IT_GPU:
       if (!g_gpus_listed) GpusRefresh();
@@ -1270,6 +1276,11 @@ void ItemText(int it, wchar_t* label, wchar_t* value, bool* greyed) {
       wcscpy(label, T(L"Antisserrilhamento", L"Anti-aliasing"));
       wcscpy(value, g_opt.aa ? L"FXAA" : T(L"Desligado", L"Off"));
       break;
+    case IT_MSAA:
+      wcscpy(label, T(L"Multiamostragem (MSAA)", L"Multisampling (MSAA)"));
+      if (g_opt.msaa) swprintf(value, 128, L"%dx", g_opt.msaa);
+      else wcscpy(value, T(L"Desligada", L"Off"));
+      break;
     case IT_ANISO:
       wcscpy(label, T(L"Filtro anisotrópico", L"Anisotropic filtering"));
       if (g_opt.aniso) swprintf(value, 128, L"%dx", g_opt.aniso);
@@ -1332,6 +1343,7 @@ const wchar_t* ItemHelp(int it) {
     case IT_UPSCALE: return T(L"Como a imagem é ampliada quando a resolução interna é menor que a da tela. AMD FSR 1.0 reconstrói as bordas e aumenta a nitidez.", L"How the picture is enlarged when the internal resolution is below the screen's. AMD FSR 1.0 rebuilds edges and sharpens.");
     case IT_ASPECT: return T(L"O jogo é 16:9. Em telas de outro formato, com barras ou esticado.", L"The game is 16:9. On other screen shapes: with bars or stretched.");
     case IT_AA: return T(L"FXAA suaviza as bordas serrilhadas com custo quase nulo.", L"FXAA smooths jagged edges with minimal performance cost.");
+    case IT_MSAA: return T(L"Suaviza as bordas da cena 3D desenhando-a com várias amostras por pixel. Mais nítido que o FXAA, mais trabalho para a placa.", L"Smooths the edges of the 3D scene by drawing it with several samples per pixel. Sharper than FXAA, more work for the graphics card.");
     case IT_ANISO: return T(L"Deixa nítidas as texturas vistas em ângulo, como o chão.", L"Sharpens textures viewed at an angle, such as the ground.");
     case IT_API: {
       wchar_t dir[MAX_PATH];
@@ -2248,8 +2260,8 @@ void MenuLoop(ID3D11Device* dev, ID3D11DeviceContext* ctx, IDXGISwapChain1* swap
       g_window->SetCursorVisibility(display ? rex::ui::Window::CursorVisibility::kAutoHidden
                                             : rex::ui::Window::CursorVisibility::kVisible);
   });
-  REXLOG_INFO("[pc] settings menu closed: display {}, vsync {}, fps {}, fxaa {}, aniso {}, aspect {}, volume {}{}",
-              g_opt.display, g_opt.vsync, g_opt.fps, g_opt.aa, g_opt.aniso, g_opt.aspect, g_opt.volume,
+  REXLOG_INFO("[pc] settings menu closed: display {}, vsync {}, fps {}, fxaa {}, msaa {}, aniso {}, aspect {}, volume {}{}",
+              g_opt.display, g_opt.vsync, g_opt.fps, g_opt.aa, g_opt.msaa, g_opt.aniso, g_opt.aspect, g_opt.volume,
               RestartPending() ? " (restart pending)" : "");
   (void)dev;
 }
@@ -2277,6 +2289,7 @@ void Configure(const GameInfo& info, bool sdk_flags) {
   g_opt.aa = Clampi(IniGet(L"fxaa", 0), 0, 1);
   g_opt.aniso = IniGet(L"anisotropico", 0);
   if (std::find(std::begin(k_aniso), std::end(k_aniso), g_opt.aniso) == std::end(k_aniso)) g_opt.aniso = 0;
+  g_opt.msaa = info.msaa ? IniGet(L"msaa", 0) : 0;
   g_opt.adapter = Clampi(IniGet(L"gpu", -1), -1, 15);
   g_opt.api = Clampi(IniGet(L"api_grafica", 0), 0, 1);
   g_opt.language = IniGet(L"idioma", 0);
@@ -2295,6 +2308,8 @@ void Configure(const GameInfo& info, bool sdk_flags) {
   g_opt.upscale = EnvInt("PCS_UPSCALE", g_opt.upscale) != 0;
   g_opt.ui_language = Clampi(EnvInt("PCS_UI_LANGUAGE", g_opt.ui_language), -1, kUiLangCount - 1);
   g_opt.aniso = EnvInt("PCS_ANISO", g_opt.aniso);
+  if (info.msaa) g_opt.msaa = EnvInt("PCS_MSAA", g_opt.msaa);
+  if (std::find(std::begin(k_msaa), std::end(k_msaa), g_opt.msaa) == std::end(k_msaa)) g_opt.msaa = 0;
   g_opt.show_fps = EnvInt("PCS_SHOW_FPS", g_opt.show_fps) != 0;
   g_opt.display = Clampi(EnvInt("PCS_DISPLAY", g_opt.display), 0, 2);
   g_opt.monitor = Clampi(EnvInt("PCS_MONITOR", g_opt.monitor), 0, 15);
@@ -2405,6 +2420,26 @@ bool EffectEnabled(int index) {
 }
 
 int Anisotropy() { return g_opt.aniso; }
+
+int MsaaSamples() {
+  if (!g_configured || !g_info.msaa) return 1;
+  return g_opt.msaa > 1 ? g_opt.msaa : 1;  // live: the renderers re-read it every frame
+}
+
+uint32_t SupportedSamples(ID3D11Device* device, uint32_t want, std::initializer_list<DXGI_FORMAT> formats) {
+  for (; want > 1; want /= 2) {
+    bool ok = true;
+    for (DXGI_FORMAT f : formats) {
+      UINT quality = 0;
+      if (FAILED(device->CheckMultisampleQualityLevels(f, want, &quality)) || !quality) {
+        ok = false;
+        break;
+      }
+    }
+    if (ok) return want;
+  }
+  return 1;
+}
 
 uint32_t SwapChainFlags() {
   static uint32_t flags = [] {

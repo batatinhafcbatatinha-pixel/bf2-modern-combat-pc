@@ -184,6 +184,15 @@ float4 ps_copy(FsOut i) : SV_Target {
   float4 v = src.Load(int3(p, 0));
   return u2.z != 0.0 ? v.bgra : v;
 }
+// Resolve of a multisampled target (MSAA): the average of the first u2.w samples (1 for depth).
+Texture2DMS<float4> src_ms : register(t0);
+float4 ps_copy_ms(FsOut i) : SV_Target {
+  int2 p = int2(i.pos.xy) + int2(u2.xy);
+  float4 v = 0.0;
+  for (int s = 0; s < int(u2.w); ++s) v += src_ms.Load(p, s);
+  v /= max(u2.w, 1.0);
+  return u2.z != 0.0 ? v.bgra : v;
+}
 float4 ps_present(FsOut i) : SV_Target {
   float4 v = src.SampleLevel(lin, i.uv * u3.xy, 0.0);
   return float4(u3.z != 0.0 ? v.bgr : v.rgb, 1.0);
@@ -254,6 +263,7 @@ struct HostRT {
   ComPtr<ID3D11ShaderResourceView> srv;
   uint32_t width = 0, height = 0;
   uint32_t guest_format = 0;
+  uint32_t samples = 1;  // MSAA (PC settings)
   DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
   bool depth = false;
   float scale = 1.0f;  // host texels per guest texel (internal resolution)
@@ -313,6 +323,7 @@ struct Targets {
   HostRT* depth = nullptr;
   uint32_t width = 0, height = 0;
   float scale = 1.0f;  // internal resolution of these targets
+  uint32_t samples = 1;
 };
 
 enum class Kind { kPoints, kLines, kTris, kRects };
@@ -416,7 +427,7 @@ class Renderer {
   uint32_t index_pos_ = kIndexRingCount;  // first map, including startup, must discard
 
   ComPtr<ID3D11VertexShader> vs_fs_;
-  ComPtr<ID3D11PixelShader> ps_clear_, ps_copy_, ps_present_, ps_depth20e4_;
+  ComPtr<ID3D11PixelShader> ps_clear_, ps_copy_, ps_copy_ms_, ps_present_, ps_depth20e4_;
   ComPtr<ID3D11GeometryShader> gs_point_, gs_rect_;
   ComPtr<ID3D11SamplerState> linear_clamp_;
   ComPtr<ID3D11ShaderResourceView> black_2d_, black_3d_, black_cube_;
@@ -439,6 +450,20 @@ class Renderer {
   // pixels.
   float scale_ = 1.0f;
   float ScaleFor(uint32_t width) const { return width >= 640 ? scale_ : 1.0f; }
+  // MSAA (PC settings, live) on the same scene-sized targets; resolves average the samples.
+  uint32_t msaa_ = 1, msaa_wanted_ = 0;
+  uint32_t SamplesFor(uint32_t width) const { return width >= 640 ? msaa_ : 1; }
+  void UpdateMsaa() {
+    uint32_t want = uint32_t(pcs::MsaaSamples());
+    if (want == msaa_wanted_) return;
+    msaa_wanted_ = want;
+    uint32_t m = pcs::SupportedSamples(dev_.Get(), want,
+                                       {DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_R10G10B10A2_UNORM,
+                                        DXGI_FORMAT_R16G16_FLOAT, DXGI_FORMAT_R32_FLOAT, DXGI_FORMAT_R32G32_FLOAT,
+                                        DXGI_FORMAT_R16G16B16A16_FLOAT, DXGI_FORMAT_D32_FLOAT_S8X24_UINT});
+    if (m != msaa_) REXLOG_INFO("bf2native: MSAA {}x -> {}x (asked {}x)", msaa_, m, want);
+    msaa_ = m;
+  }
   static uint32_t ScaledSize(uint32_t v, float s) {
     return std::max<uint32_t>(1, uint32_t(std::ceil(float(v) * s - 0.001f)));
   }
@@ -541,6 +566,7 @@ bool Renderer::Init(HWND hwnd) {
     REXLOG_ERROR("bf2native: D3D11CreateDevice failed {:08X}", uint32_t(hr));
     return false;
   }
+  UpdateMsaa();
   if(flags & D3D11_CREATE_DEVICE_DEBUG) {
     dev_.As(&debug_messages_);
     if(debug_messages_) debug_messages_->SetMuteDebugOutput(TRUE);  // retain queue without debugger I/O stalls
@@ -666,15 +692,17 @@ bool Renderer::CreateUtility() {
   auto vs = Compile(util, "vs_fs", "vs_5_0");
   auto pc = Compile(util, "ps_clear", "ps_5_0");
   auto pk = Compile(util, "ps_copy", "ps_5_0");
+  auto pm = Compile(util, "ps_copy_ms", "ps_5_0");
   auto pp = Compile(util, "ps_present", "ps_5_0");
   auto gp = Compile(gs, "gs_point", "gs_5_0");
   auto gr = Compile(gs, "gs_rect", "gs_5_0");
   auto pd = Compile(std::string(kDepthPrecisionHlsl)+
       "float main(float4 position:SV_Position):SV_Depth {return xdepth20e4(position.z);}","main","ps_5_0");
-  if (!vs || !pc || !pk || !pp || !gp || !gr || !pd) return false;
+  if (!vs || !pc || !pk || !pm || !pp || !gp || !gr || !pd) return false;
   dev_->CreateVertexShader(vs->GetBufferPointer(), vs->GetBufferSize(), nullptr, &vs_fs_);
   dev_->CreatePixelShader(pc->GetBufferPointer(), pc->GetBufferSize(), nullptr, &ps_clear_);
   dev_->CreatePixelShader(pk->GetBufferPointer(), pk->GetBufferSize(), nullptr, &ps_copy_);
+  dev_->CreatePixelShader(pm->GetBufferPointer(), pm->GetBufferSize(), nullptr, &ps_copy_ms_);
   dev_->CreatePixelShader(pp->GetBufferPointer(), pp->GetBufferSize(), nullptr, &ps_present_);
   dev_->CreatePixelShader(pd->GetBufferPointer(), pd->GetBufferSize(), nullptr, &ps_depth20e4_);
   dev_->CreateGeometryShader(gp->GetBufferPointer(), gp->GetBufferSize(), nullptr, &gs_point_);
@@ -914,19 +942,21 @@ HostRT* Renderer::GetRT(uint32_t base, uint32_t format, uint32_t w, uint32_t h, 
   uint64_t key = uint64_t(base & 0xFFF) | (uint64_t(format & 0xF) << 12) |
                  (uint64_t(depth) << 16) | (uint64_t(w) << 17) | (uint64_t(h) << 31);
   auto it = rts_.find(key);
-  if (it != rts_.end() && it->second.scale == ScaleFor(w)) return &it->second;
+  const uint32_t samples = SamplesFor(w);
+  if (it != rts_.end() && it->second.scale == ScaleFor(w) && it->second.samples == samples) return &it->second;
   HostRT rt;
   rt.width = w;
   rt.height = h;
   rt.guest_format = format;
   rt.depth = depth;
+  rt.samples = samples;
   D3D11_TEXTURE2D_DESC d{};
   rt.scale = ScaleFor(w);
   d.Width = ScaledSize(w, rt.scale);
   d.Height = ScaledSize(h, rt.scale);
   d.MipLevels = 1;
   d.ArraySize = 1;
-  d.SampleDesc.Count = 1;
+  d.SampleDesc.Count = samples;
   d.Usage = D3D11_USAGE_DEFAULT;
   d.BindFlags = D3D11_BIND_SHADER_RESOURCE;
   if (depth) {
@@ -943,11 +973,11 @@ HostRT* Renderer::GetRT(uint32_t base, uint32_t format, uint32_t w, uint32_t h, 
   if (depth) {
     D3D11_DEPTH_STENCIL_VIEW_DESC v{};
     v.Format = DXGI_FORMAT_D32_FLOAT_S8X24_UINT;
-    v.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE2D;
+    v.ViewDimension = samples > 1 ? D3D11_DSV_DIMENSION_TEXTURE2DMS : D3D11_DSV_DIMENSION_TEXTURE2D;
     dev_->CreateDepthStencilView(rt.tex.Get(), &v, &rt.dsv);
     D3D11_SHADER_RESOURCE_VIEW_DESC s{};
     s.Format = DXGI_FORMAT_R32_FLOAT_X8X24_TYPELESS;
-    s.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+    s.ViewDimension = samples > 1 ? D3D11_SRV_DIMENSION_TEXTURE2DMS : D3D11_SRV_DIMENSION_TEXTURE2D;
     s.Texture2D.MipLevels = 1;
     dev_->CreateShaderResourceView(rt.tex.Get(), &s, &rt.srv);
     ctx_->ClearDepthStencilView(rt.dsv.Get(), D3D11_CLEAR_DEPTH | D3D11_CLEAR_STENCIL, 1.0f, 0);
@@ -955,18 +985,18 @@ HostRT* Renderer::GetRT(uint32_t base, uint32_t format, uint32_t w, uint32_t h, 
     RtFormat f = ColorFormat(format);
     D3D11_RENDER_TARGET_VIEW_DESC v{};
     v.Format = f.rtv;
-    v.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2D;
+    v.ViewDimension = samples > 1 ? D3D11_RTV_DIMENSION_TEXTURE2DMS : D3D11_RTV_DIMENSION_TEXTURE2D;
     dev_->CreateRenderTargetView(rt.tex.Get(), &v, &rt.rtv);
     D3D11_SHADER_RESOURCE_VIEW_DESC s{};
     s.Format = f.srv;
-    s.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+    s.ViewDimension = samples > 1 ? D3D11_SRV_DIMENSION_TEXTURE2DMS : D3D11_SRV_DIMENSION_TEXTURE2D;
     s.Texture2D.MipLevels = 1;
     dev_->CreateShaderResourceView(rt.tex.Get(), &s, &rt.srv);
     const float zero[4] = {0, 0, 0, 0};
     ctx_->ClearRenderTargetView(rt.rtv.Get(), zero);
   }
-  REXLOG_INFO("bf2native: {} target base {} fmt {} {}x{}", depth ? "depth" : "color", base & 0xFFF,
-              format, w, h);
+  REXLOG_INFO("bf2native: {} target base {} fmt {} {}x{} samples {}", depth ? "depth" : "color",
+              base & 0xFFF, format, w, h, samples);
   return &(rts_[key] = std::move(rt));
 }
 
@@ -991,6 +1021,7 @@ bool Renderer::CurrentTargets(uint32_t device, Targets& t, bool want_color) {
   t.width = std::clamp(w, 1u, 8192u);
   t.height = std::clamp(h, 1u, 8192u);
   t.scale = ScaleFor(t.width);
+  t.samples = SamplesFor(t.width);
   uint32_t edram_mode = Reg(device, 0x2208) & 7;
   static const uint32_t kInfo[4] = {0x2001, 0x2003, 0x2004, 0x2005};
   if (want_color && edram_mode != 5) {
@@ -1003,7 +1034,8 @@ bool Renderer::CurrentTargets(uint32_t device, Targets& t, bool want_color) {
       if (t.color[i] && t.gamma[i] && !t.color[i]->rtv_gamma) {
         D3D11_RENDER_TARGET_VIEW_DESC v{};
         v.Format = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
-        v.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2D;
+        v.ViewDimension = t.color[i]->samples > 1 ? D3D11_RTV_DIMENSION_TEXTURE2DMS
+                                                  : D3D11_RTV_DIMENSION_TEXTURE2D;
         dev_->CreateRenderTargetView(t.color[i]->tex.Get(), &v, &t.color[i]->rtv_gamma);
       }
     }
@@ -1997,6 +2029,7 @@ void Renderer::Draw(uint32_t device, uint32_t prim, std::vector<uint32_t>& vids,
   }
   rd.DepthClipEnable = !((Reg(device, 0x2204) >> 16) & 1);
   rd.ScissorEnable = TRUE;
+  rd.MultisampleEnable = t.samples > 1;
   auto* raster_state = GetRasterizer(rd);
   if (pipeline_cache_.raster.Changed(raster_state)) ctx_->RSSetState(raster_state);
 
@@ -2095,7 +2128,7 @@ void Renderer::Draw(uint32_t device, uint32_t prim, std::vector<uint32_t>& vids,
   }
 
   HostRT* rt0 = t.color[0];
-  if (step_on_ && frame_ == trace_frame_ && rt0 && rt0->width >= step_box_.right &&
+  if (step_on_ && frame_ == trace_frame_ && rt0 && rt0->samples == 1 && rt0->width >= step_box_.right &&
       rt0->height >= step_box_.bottom) {
     D3D11_TEXTURE2D_DESC rd;
     rt0->tex->GetDesc(&rd);
@@ -2345,6 +2378,7 @@ void Renderer::Resolve(uint32_t device, uint32_t flags, uint32_t src_rect, uint3
           u.u2[0] = float(ScaledCoord(sx0, t.scale) - ScaledCoord(dx, t.scale));
           u.u2[1] = float(ScaledCoord(sy0, t.scale) - ScaledCoord(dy, t.scale));
           u.u2[2] = swap ? 1.0f : 0.0f;
+          u.u2[3] = src->depth ? 1.0f : float(src->samples);  // MSAA: depth keeps sample 0
           SetUtil(u);
           r->bgra = swap;
           ctx_->IASetInputLayout(nullptr);
@@ -2352,7 +2386,7 @@ void Renderer::Resolve(uint32_t device, uint32_t flags, uint32_t src_rect, uint3
           ctx_->VSSetShader(vs_fs_.Get(), nullptr, 0);
           ctx_->VSSetConstantBuffers(0, 1, util_cb_.GetAddressOf());
           ctx_->GSSetShader(nullptr, nullptr, 0);
-          ctx_->PSSetShader(ps_copy_.Get(), nullptr, 0);
+          ctx_->PSSetShader(src->samples > 1 ? ps_copy_ms_.Get() : ps_copy_.Get(), nullptr, 0);
           ctx_->PSSetConstantBuffers(0, 1, util_cb_.GetAddressOf());
           ID3D11ShaderResourceView* srv = src->srv.Get();
           ctx_->PSSetShaderResources(0, 1, &srv);
@@ -2722,6 +2756,7 @@ void Renderer::Swap(uint32_t device, uint32_t front_texture) {
       LogCenterTexel(res.tex.Get(), name);
     }
     for (auto& [key, rt] : rts_) {
+      if (rt.samples > 1) continue;  // MSAA targets: their resolves are dumped above
       snprintf(name, sizeof(name), "rt_%s_%03X_f%u_%ux%u", rt.depth ? "d" : "c", uint32_t(key & 0xFFF),
                rt.guest_format, rt.width, rt.height);
       DumpSrv(rt.srv.Get(), rt.width, rt.height, name);
@@ -2760,6 +2795,8 @@ void Renderer::Swap(uint32_t device, uint32_t front_texture) {
     REXLOG_INFO("bf2native: internal resolution x{:.3f} -> x{:.3f}", scale_, s);
     scale_ = s;
   }
+  // MSAA likewise: targets of another sample count are recreated as they are used.
+  UpdateMsaa();
   pcs::Present(dev_.Get(), imm_.Get(), swap_.Get(), picture,
                [this](ID3D11RenderTargetView** rtv, uint32_t* w, uint32_t* h) {
                  RECT cr{};

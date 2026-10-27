@@ -18,7 +18,10 @@
 // ini (test runs); PCS_FPS_LOG=1 logs the frame rate every 5 s.
 #pragma once
 
+#include <dxgiformat.h>
+
 #include <cstdint>
+#include <initializer_list>
 #include <functional>
 #include <string>
 #include <vector>
@@ -44,6 +47,7 @@ struct Settings {
   int aspect = 0;       // 0 original 16:9 with bars, 1 stretched to the window
   int upscale = 0;      // picture below the window's size: 0 bilinear, 1 AMD FSR 1.0 (EASU + RCAS)
   int aa = 0;           // FXAA
+  int msaa = 0;         // MSAA on the game's render targets: 0 off, 2, 4 or 8 samples
   int aniso = 0;        // 0 = the game's filtering, else 2..16
   int adapter = -1;     // DXGI adapter index; -1 = Windows default (restart)
   int api = 0;          // 0 Direct3D 11, 1 Vulkan through DXVK (vulkan\ next to the exe) (restart)
@@ -150,6 +154,7 @@ struct GameInfo {
   const Language* languages = nullptr;
   int language_count = 0;
   bool internal_resolution = false;  // the renderer honours pcs::ResolutionScale()
+  bool msaa = false;                 // the renderer honours pcs::MsaaSamples()
   // The game measures real time (its simulation follows the clock, not the number of frames):
   // it may run above 60 fps, so the menu offers "monitor rate" and "no limit". Games that
   // advance one fixed step per frame keep 60 (more frames would speed them up).
@@ -185,6 +190,12 @@ const Settings& Get();
 
 // Boot-time values for the renderer.
 float ResolutionScale();          // internal resolution factor (1 = 720p); changes live (read per frame)
+// Samples per pixel of the game's render targets (1 = off). Changes live (read per frame): the
+// renderer recreates its targets, clamped to what the card supports for every target format.
+int MsaaSamples();
+// The largest sample count up to `want` that `device` renders and samples for every format
+// in `formats` (1 = no multisampling).
+uint32_t SupportedSamples(ID3D11Device* device, uint32_t want, std::initializer_list<DXGI_FORMAT> formats);
 // Live, thread-safe effect value. Before Configure supplies descriptors, defaults to on.
 // Configure applies each descriptor's default_on; out-of-range indices return on.
 bool EffectEnabled(int index);
