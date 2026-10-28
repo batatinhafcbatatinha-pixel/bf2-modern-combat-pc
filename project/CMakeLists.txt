@@ -26,6 +26,7 @@ set(BF2MC_SOURCES
     src/native_gpu/xenos_hlsl.cpp
     src/native_audio/audio_exports.cpp
     src/native_audio/audio_system.cpp
+    src/native_audio/command_queue.cpp
     src/native_audio/xma_engine.cpp
 )
 

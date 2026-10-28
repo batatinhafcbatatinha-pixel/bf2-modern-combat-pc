@@ -19,6 +19,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <string>
 
 namespace rex::memory {
 class Memory;
@@ -59,6 +60,16 @@ class XmaEngine {
     uint32_t kicks = 0, frames = 0, failed = 0, blocks = 0, no_output = 0, peak = 0;
   };
   Stats TakeStats();
+
+  // Stall diagnostics: a short per-context history of API calls and decode pass outcomes, and a
+  // readable dump of the context with that history.
+  void Trace(int index, const char* what, uint32_t value = 0);
+
+  // The game waits for output its stream end requires while the context has no input left (see
+  // xma_engine.cpp): releases the frame the decoder holds back, completed with silence. Returns the
+  // blocks written.
+  uint32_t ReleaseHeldFrame(int index);
+  std::string Describe(int index);
 
   // Runs `fn` with the context's guest structure while no decode pass can touch it.
   template <typename Fn>

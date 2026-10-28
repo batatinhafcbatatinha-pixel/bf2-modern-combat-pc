@@ -17,6 +17,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <mutex>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -121,6 +122,18 @@ struct DecoderState {
   uint32_t pending_output_limit = 0;
   uint32_t pending_start_skip = 0;
 
+  // Diagnostics (XmaEngine::Trace / Describe): recent events, oldest overwritten.
+  struct Event {
+    const char* what;
+    uint32_t value;
+    std::chrono::steady_clock::time_point when;
+  };
+  std::mutex trace_lock;
+  std::array<Event, 32> events{};
+  uint32_t event_count = 0;
+  const char* last_pass = nullptr;
+  uint32_t last_pass_value = 0;
+
   ~DecoderState() {
     if (av) avcodec_free_context(&av);
     if (frame) av_frame_free(&frame);
@@ -208,6 +221,7 @@ struct XmaEngine::Impl {
     const Ctx initial = c;
     if (!c[kOutValid]) {
       if (kicked) g_no_output++;  // the sweep finds full rings all the time
+      PassOutcome(index, "pass: output not valid", c[kOutWrite]);
       return;
     }
 
@@ -221,6 +235,7 @@ struct XmaEngine::Impl {
 
     // No input: only drain what is left of the current frame.
     if ((c[kIn0Packets] | c[kIn1Packets]) == 0) {
+      PassOutcome(index, "pass: no input packets", s.frame_remaining_subframes);
       if (s.frame_remaining_subframes) {
         Consume(s, c, out);
         c.set(kOutWrite, out.write / kOutputBlockBytes);
@@ -230,22 +245,46 @@ struct XmaEngine::Impl {
     }
 
     const int32_t minimum = int32_t(std::max(1u, c[kSubframeDecodeCount]) + c[kOutPadding]);
+    const uint32_t write_before = out.write;
+    const char* stop = s.free_blocks >= minimum ? "pass: ring full" : "pass: free blocks below minimum";
     while (s.free_blocks >= minimum) {
       const Ctx before = c;
       const uint32_t remaining = s.frame_remaining_subframes;
       const int32_t free_before = s.free_blocks;
       Decode(s, c);
       Consume(s, c, out);
-      if (!c.AnyInputValid() || c[kErrorStatus] == 4) break;
+      if (!c.AnyInputValid()) {
+        stop = "pass: input exhausted";
+        break;
+      }
+      if (c[kErrorStatus] == 4) {
+        stop = "pass: error 4";
+        break;
+      }
       // Malformed input that neither advances the stream nor produces output must not spin.
       if (std::memcmp(&before, &c, sizeof(c)) == 0 && remaining == s.frame_remaining_subframes &&
           free_before == s.free_blocks) {
+        stop = "pass: no progress";
         break;
       }
     }
+    PassOutcome(index, stop, (out.write + out.capacity - write_before) % std::max(1u, out.capacity));
     c.set(kOutWrite, out.write / kOutputBlockBytes);
     if (out.empty_after_write()) c.set(kOutValid, 0);  // ring full
     StoreMerged(guest, c, initial);
+  }
+
+  // Records a pass outcome when it differs from the previous one (passes repeat every 2 ms).
+  void PassOutcome(int index, const char* what, uint32_t value) {
+    DecoderState& s = states[index];
+    if (what == s.last_pass && (value == 0) == (s.last_pass_value == 0)) return;
+    s.last_pass = what;
+    s.last_pass_value = value;
+    AddEvent(s, what, value);
+  }
+  static void AddEvent(DecoderState& s, const char* what, uint32_t value) {
+    std::lock_guard lock(s.trace_lock);
+    s.events[s.event_count++ % s.events.size()] = {what, value, std::chrono::steady_clock::now()};
   }
 
   // Writes back what the decoder owns, keeping fields the game changed meanwhile.
@@ -315,10 +354,15 @@ struct XmaEngine::Impl {
     return kBitsPerPacketHeader;
   }
 
+  void Swap(DecoderState& s, Ctx& c) {
+    SwapInput(c);
+    AddEvent(s, "decode: input swapped, current", c.current());
+  }
+
   void Decode(DecoderState& s, Ctx& c) {
     if (!c.AnyInputValid() || s.frame_remaining_subframes > 0) return;
     if (!c.InputValid(c.current())) {
-      SwapInput(c);
+      Swap(s, c);
       if (!c.InputValid(c.current())) return;
     }
     if (!c[kOutBlocks]) return;
@@ -334,7 +378,7 @@ struct XmaEngine::Impl {
     const uint32_t read_offset = c[kInReadOffset];
     if (read_offset >= packet_count * kBitsPerPacket) {
       REXLOG_WARN("[native-xma] read offset {} past the input buffer ({} packets)", read_offset, packet_count);
-      SwapInput(c);
+      Swap(s, c);
       return;
     }
     const uint32_t packet_index = read_offset / kBitsPerPacket;
@@ -349,7 +393,7 @@ struct XmaEngine::Impl {
     const uint32_t skip = PacketSkipCount(packet);
     if (skip == 0xFF) {  // no frame starts in this packet
       uint32_t next = NextPacketReadOffset(buffer, packet_index + 1, packet_count);
-      if (next == kBitsPerPacketHeader) SwapInput(c);
+      if (next == kBitsPerPacketHeader) Swap(s, c);
       c.set(kInReadOffset, next);
       return;
     }
@@ -361,7 +405,7 @@ struct XmaEngine::Impl {
     if (info.current_frame_size == 0) {
       const uint8_t* next = NextPacket(c, next_packet_index, packet_count);
       if (!next) {
-        SwapInput(c);
+        Swap(s, c);
         return;
       }
       std::memcpy(s.input.data(), packet + 4, kBytesPerPacketData);
@@ -369,6 +413,7 @@ struct XmaEngine::Impl {
       uint32_t size = PeekBits(s.input.data(), s.input.size() * 8, relative - kBitsPerPacketHeader, kBitsPerFrameHeader);
       if (size == kMaxFrameLength) {
         c.set(kErrorStatus, 4);
+        AddEvent(s, "decode: error 4 at bit", c[kInReadOffset]);
         return;
       }
       info.current_frame_size = size;
@@ -377,13 +422,14 @@ struct XmaEngine::Impl {
     const uint32_t bits_left_in_packet = (packet_index + 1) * kBitsPerPacket - c[kInReadOffset];
     const uint32_t bits_in_packet = std::min(bits_left_in_packet, info.current_frame_size);
     if (bits_in_packet == 0) {
-      SwapInput(c);
+      Swap(s, c);
       return;
     }
     if (info.LastFrameInPacket() && bits_left_in_packet < info.current_frame_size) {
       const uint8_t* next = NextPacket(c, next_packet_index, packet_count);
       if (!next) {
         c.set(kErrorStatus, 4);
+        AddEvent(s, "decode: error 4 at bit", c[kInReadOffset]);
         return;
       }
       std::memcpy(s.input.data() + kBytesPerPacketData, next + 4, kBytesPerPacketData);
@@ -456,11 +502,11 @@ struct XmaEngine::Impl {
     }
     uint32_t next = NextPacketReadOffset(buffer, next_packet_index, packet_count);
     if (next == kBitsPerPacketHeader) {
-      SwapInput(c);
+      Swap(s, c);
       if (c.AnyInputValid()) {
         next = PacketFrameOffset(Physical(c.InputAddress(c.current())));
         if (next > kMaxFrameSizeInBits) {
-          SwapInput(c);
+          Swap(s, c);
           return;
         }
       }
@@ -659,6 +705,87 @@ void XmaEngine::Clear(int index) {
   c.set(kOutWrite, 0);
   c.Store(guest);
   s.ResetCodecHistory();
+}
+
+void XmaEngine::Trace(int index, const char* what, uint32_t value) {
+  if (index < 0 || index >= int(kContextCount)) return;
+  Impl::AddEvent(impl_->states[index], what, value);
+}
+
+std::string XmaEngine::Describe(int index) {
+  if (index < 0 || index >= int(kContextCount)) return "no context";
+  DecoderState& s = impl_->states[index];
+  Ctx c;
+  c.Load(impl_->Context(index));
+  std::string r;
+  char line[256];
+  snprintf(line, sizeof(line),
+           "ctx %d: enabled %d allocated %d busy %d | in0 %08X x%u valid %u | in1 %08X x%u valid %u | current %u "
+           "read bit %u | out %08X blocks %u read %u write %u valid %u | subframes %u padding %u stereo %u rate %u | "
+           "loop %u..%u count %u | error %u | frame left %u carry %d free %d\n",
+           index, int(s.enabled.load()), int(s.allocated), int(s.busy.load()), c.d[kIn0Ptr], c[kIn0Packets],
+           c[kIn0Valid], c.d[kIn1Ptr], c[kIn1Packets], c[kIn1Valid], c.current(), c[kInReadOffset], c.d[kOutPtr],
+           c[kOutBlocks], c[kOutRead], c[kOutWrite], c[kOutValid], c[kSubframeDecodeCount], c[kOutPadding],
+           c[kStereo], c[kSampleRate], c[kLoopStart], c[kLoopEnd], c[kLoopCount], c[kErrorStatus],
+           s.frame_remaining_subframes, int(s.carry_valid), s.free_blocks);
+  r += line;
+  std::lock_guard lock(s.trace_lock);
+  const auto now = std::chrono::steady_clock::now();
+  uint32_t n = std::min<uint32_t>(s.event_count, uint32_t(s.events.size()));
+  for (uint32_t i = 0; i < n; i++) {
+    const auto& e = s.events[(s.event_count - n + i) % s.events.size()];
+    snprintf(line, sizeof(line), "  -%7.1f ms %s %u\n",
+             std::chrono::duration<double, std::milli>(now - e.when).count(), e.what, e.value);
+    r += line;
+  }
+  return r;
+}
+
+// FFmpeg delivers each frame kDecoderStartPadding samples late, so Decode emits frame k only once
+// frame k+1 is decoded (carry + head of the next block). The hardware has no such delay: when a
+// stream's input runs out, everything it contained is in the output ring. The game relies on that -
+// its streaming mixer (sub_820E9968) busy-waits until the ring holds all the samples the stream
+// header promised, and only feeds input after that wait - so the held-back last frame deadlocked
+// it: the audio thread spun forever, its command stream overflowed into the heap and the main
+// thread crashed later. When the game is found waiting with no input left, the held frame is
+// released, its missing tail (the delayed samples that would follow) as silence.
+uint32_t XmaEngine::ReleaseHeldFrame(int index) {
+  if (index < 0 || index >= int(kContextCount)) return 0;
+  DecoderState& s = impl_->states[index];
+  std::lock_guard lock(s.lock);
+  if (!s.allocated) return 0;
+  uint8_t* guest = impl_->Context(index);
+  Ctx c;
+  c.Load(guest);
+  const Ctx initial = c;
+  if (!c[kOutValid] || c.AnyInputValid() || s.frame_remaining_subframes || !c[kOutBlocks]) return 0;
+  const bool stereo = c[kStereo] != 0;
+  const uint32_t frame_bytes = kBytesPerFrameChannel << stereo;
+  const uint32_t pad_bytes = (kDecoderStartPadding * 2) << stereo;
+  s.raw.fill(0);
+  if (s.carry_valid) std::memcpy(s.raw.data(), s.carry.data(), frame_bytes - pad_bytes);
+  s.carry_valid = false;
+  s.frame_remaining_subframes = kBlocksPerFrameChannel << stereo;
+  s.loop_output_limit = 0;
+  OutputRing out{impl_->Physical(c.d[kOutPtr]), c[kOutBlocks] * kOutputBlockBytes, c[kOutRead] * kOutputBlockBytes,
+                 c[kOutWrite] * kOutputBlockBytes};
+  out.read %= out.capacity;
+  out.write %= out.capacity;
+  s.free_blocks = int32_t(out.free_bytes() / kOutputBlockBytes);
+  const uint32_t write_before = out.write;
+  const int32_t minimum = int32_t(std::max(1u, c[kSubframeDecodeCount]) + c[kOutPadding]);
+  while (s.frame_remaining_subframes && s.free_blocks >= minimum) {
+    const uint32_t left = s.frame_remaining_subframes;
+    Impl::Consume(s, c, out);
+    if (left == s.frame_remaining_subframes) break;
+  }
+  s.frame_remaining_subframes = 0;  // whatever did not fit is dropped: it is past the stream's end
+  c.set(kOutWrite, out.write / kOutputBlockBytes);
+  if (out.empty_after_write()) c.set(kOutValid, 0);
+  Impl::StoreMerged(guest, c, initial);
+  const uint32_t blocks = ((out.write + out.capacity - write_before) % out.capacity) / kOutputBlockBytes;
+  Impl::AddEvent(s, "released held frame, blocks", blocks);
+  return blocks;
 }
 
 XmaEngine::Stats XmaEngine::TakeStats() {

@@ -4,7 +4,9 @@
 // XAudio render driver; it has no statically linked XMAPlayback library.
 
 #include <atomic>
+#include <chrono>
 #include <cstring>
+#include <string>
 #include <thread>
 
 #include <rex/hook.h>
@@ -56,6 +58,10 @@ void EditContext(uint32_t context, Fn&& fn) {
   });
 }
 
+void TraceCall(uint32_t context, const char* what, uint32_t value = 0) {
+  XmaEngine::Get().Trace(XmaEngine::Get().IndexOf(context), what, value);
+}
+
 uint32_t ReadField(uint8_t* base, uint32_t context, xf::Field f) {
   Ctx c;
   c.Load(rex::memory::GuestPtr(base, context));
@@ -76,6 +82,7 @@ REX_HOOK_RAW(__imp__XMACreateContext) {
 }
 
 REX_HOOK_RAW(__imp__XMAReleaseContext) {
+  TraceCall(ctx.r3.u32, "game: release");
   XmaEngine::Get().Release(ctx.r3.u32);
   ctx.r3.u64 = 0;
 }
@@ -116,10 +123,12 @@ REX_HOOK_RAW(__imp__XMAInitializeContext) {
   });
   // Initialization also resets the decoder's offsets and validity, as the context clear does.
   XmaEngine::Get().Clear(index);
+  XmaEngine::Get().Trace(index, "game: initialize, out blocks", f[6]);
   ctx.r3.u64 = 0;
 }
 
 REX_HOOK_RAW(__imp__XMASetInputBuffer0) {
+  TraceCall(ctx.r3.u32, "game: set input 0, packets", ctx.r5.u32);
   uint32_t buffer = Physical(ctx.r4.u32), packets = ctx.r5.u32;
   EditContext(ctx.r3.u32, [&](Ctx& c) {
     c.d[xf::kIn0Ptr] = buffer;
@@ -129,6 +138,7 @@ REX_HOOK_RAW(__imp__XMASetInputBuffer0) {
 }
 
 REX_HOOK_RAW(__imp__XMASetInputBuffer1) {
+  TraceCall(ctx.r3.u32, "game: set input 1, packets", ctx.r5.u32);
   uint32_t buffer = Physical(ctx.r4.u32), packets = ctx.r5.u32;
   EditContext(ctx.r3.u32, [&](Ctx& c) {
     c.d[xf::kIn1Ptr] = buffer;
@@ -141,25 +151,84 @@ REX_HOOK_RAW(__imp__XMAIsInputBuffer0Valid) { ctx.r3.u64 = ReadField(base, ctx.r
 REX_HOOK_RAW(__imp__XMAIsInputBuffer1Valid) { ctx.r3.u64 = ReadField(base, ctx.r3.u32, xf::kIn1Valid); }
 REX_HOOK_RAW(__imp__XMAIsOutputBufferValid) { ctx.r3.u64 = ReadField(base, ctx.r3.u32, xf::kOutValid); }
 REX_HOOK_RAW(__imp__XMAGetOutputBufferReadOffset) { ctx.r3.u64 = ReadField(base, ctx.r3.u32, xf::kOutRead); }
-REX_HOOK_RAW(__imp__XMAGetOutputBufferWriteOffset) { ctx.r3.u64 = ReadField(base, ctx.r3.u32, xf::kOutWrite); }
+
+// Stall detector: the game's streaming mixer (sub_820E9968) busy-waits on the write offset until
+// the decoder delivers enough output. Tens of thousands of polls of one unchanged offset within a
+// couple of seconds mean it is spinning; the context and its recent history are logged once.
+REX_HOOK_RAW(__imp__XMAGetOutputBufferWriteOffset) {
+  const uint32_t context = ctx.r3.u32;
+  const uint32_t value = ReadField(base, context, xf::kOutWrite);
+  ctx.r3.u64 = value;
+  struct Watch {
+    uint32_t value = UINT32_MAX, polls = 0;
+    std::chrono::steady_clock::time_point since;
+    bool reported = false;
+  };
+  static Watch watches[XmaEngine::kContextCount];
+  const int index = XmaEngine::Get().IndexOf(context);
+  if (index < 0) return;
+  Watch& w = watches[index];
+  if (value != w.value) {
+    if (w.reported)
+      REXLOG_WARN("[native-xma] context {} resumed after {:.0f} ms", index,
+                  std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - w.since).count());
+    w = Watch{value, 0, std::chrono::steady_clock::now(), false};
+    return;
+  }
+  if (++w.polls != 2000 || w.reported) return;
+  if (std::chrono::steady_clock::now() - w.since > std::chrono::seconds(1)) {
+    w.polls = 0;  // slow, legitimate polling of an idle voice
+    w.since = std::chrono::steady_clock::now();
+    return;
+  }
+  // A short wait can be input on its way (another thread validating a buffer): give it 20 ms.
+  if (std::chrono::steady_clock::now() - w.since < std::chrono::milliseconds(20)) {
+    w.polls = 0;
+    return;
+  }
+  // The usual cause: the stream has ended and the game waits for its last frame, which the
+  // decoder holds back (XmaEngine::ReleaseHeldFrame). Delivering it lets the game go on; the
+  // next poll sees the new write offset.
+  const std::string before = XmaEngine::Get().Describe(index);
+  if (uint32_t blocks = XmaEngine::Get().ReleaseHeldFrame(index)) {
+    static std::atomic<int> logged{0};
+    const int n = logged.fetch_add(1);
+    if (n < 4)
+      REXLOG_INFO("[native-xma] context {}: game waited at its stream end, released {} held blocks; state before:\n{}",
+                  index, blocks, before);
+    else if (n < 40)
+      REXLOG_INFO("[native-xma] context {}: game waited at its stream end, released {} held blocks", index, blocks);
+    w.polls = 0;
+    w.since = std::chrono::steady_clock::now();
+    return;
+  }
+  w.reported = true;
+  XmaEngine::Get().Trace(index, "game: spinning on write offset", value);
+  REXLOG_ERROR("[native-xma] game mixer spinning on context {} (decoder made no progress):\n{}", index,
+               XmaEngine::Get().Describe(index));
+}
 
 REX_HOOK_RAW(__imp__XMASetInputBuffer0Valid) {
+  TraceCall(ctx.r3.u32, "game: input 0 valid");
   EditContext(ctx.r3.u32, [](Ctx& c) { c.set(xf::kIn0Valid, 1); });
   ctx.r3.u64 = 0;
 }
 
 REX_HOOK_RAW(__imp__XMASetInputBuffer1Valid) {
+  TraceCall(ctx.r3.u32, "game: input 1 valid");
   EditContext(ctx.r3.u32, [](Ctx& c) { c.set(xf::kIn1Valid, 1); });
   ctx.r3.u64 = 0;
 }
 
 REX_HOOK_RAW(__imp__XMASetOutputBufferValid) {
+  TraceCall(ctx.r3.u32, "game: output valid");
   EditContext(ctx.r3.u32, [](Ctx& c) { c.set(xf::kOutValid, 1); });
   ctx.r3.u64 = 0;
 }
 
 // XMASetInputBufferReadOffset(context, bit offset)
 REX_HOOK_RAW(__imp__XMASetInputBufferReadOffset) {
+  TraceCall(ctx.r3.u32, "game: set input read bit", ctx.r4.u32);
   uint32_t offset = ctx.r4.u32;
   EditContext(ctx.r3.u32, [&](Ctx& c) { c.set(xf::kInReadOffset, offset); });
   ctx.r3.u64 = 0;
@@ -167,6 +236,7 @@ REX_HOOK_RAW(__imp__XMASetInputBufferReadOffset) {
 
 // XMASetLoopData(context, XMA_LOOP_DATA*): loop start, loop end (bits), count, subframe end, skip.
 REX_HOOK_RAW(__imp__XMASetLoopData) {
+  TraceCall(ctx.r3.u32, "game: set loop data");
   uint32_t data = ctx.r4.u32;
   uint32_t loop_start = Load32(base, data), loop_end = Load32(base, data + 4);
   const uint8_t* loop = rex::memory::GuestPtr(base, data + 8);
@@ -182,6 +252,7 @@ REX_HOOK_RAW(__imp__XMASetLoopData) {
 }
 
 REX_HOOK_RAW(__imp__XMASetOutputBufferReadOffset) {
+  TraceCall(ctx.r3.u32, "game: set output read", ctx.r4.u32);
   uint32_t offset = ctx.r4.u32;
   EditContext(ctx.r3.u32, [&](Ctx& c) { c.set(xf::kOutRead, offset); });
   ctx.r3.u64 = 0;
@@ -189,6 +260,7 @@ REX_HOOK_RAW(__imp__XMASetOutputBufferReadOffset) {
 
 // Enabling a context starts decoding it (a pass now, then the engine's background sweep).
 REX_HOOK_RAW(__imp__XMAEnableContext) {
+  TraceCall(ctx.r3.u32, "game: enable");
   XmaEngine::Get().Kick(ContextIndex(ctx.r3.u32));
   ctx.r3.u64 = 0;
 }
@@ -196,6 +268,7 @@ REX_HOOK_RAW(__imp__XMAEnableContext) {
 // XMADisableContext(context, wait): no pass may run on the context once this returns successfully;
 // without `wait` it fails while a pass is running.
 REX_HOOK_RAW(__imp__XMADisableContext) {
+  TraceCall(ctx.r3.u32, "game: disable, wait", ctx.r4.u32);
   bool done = XmaEngine::Get().Disable(ContextIndex(ctx.r3.u32), ctx.r4.u32 != 0);
   ctx.r3.u64 = done ? X_E_SUCCESS : X_E_FALSE;
 }
