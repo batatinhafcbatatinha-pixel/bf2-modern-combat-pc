@@ -47,6 +47,7 @@
 
 #include <algorithm>
 #include <array>
+#include <smmintrin.h>
 #include <atomic>
 #include <bit>
 #include <chrono>
@@ -61,6 +62,8 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <condition_variable>
+#include <deque>
 #include <unordered_map>
 #include <vector>
 
@@ -112,7 +115,86 @@ inline uint16_t Be16(const uint8_t* p) {
   std::memcpy(&v, p, 2);
   return native_host::ByteSwap16(v);
 }
-inline uint8_t* Virt(uint32_t a) { return Mem()->TranslateVirtual(a); }
+// Draw pipelining (see DrawPacket): while the worker thread executes a draw, the guest D3D device
+// is read from the copy taken when the game issued it, and the shaders and render target sizes
+// resolved then are used.
+constexpr uint32_t kDeviceShadowBytes = 0x3300;
+struct WorkerView {
+  bool active = false;
+  uint32_t device = 0;
+  uint8_t* shadow = nullptr;
+  const void* vs = nullptr;
+  const void* ps = nullptr;
+  uint32_t surfaces[5] = {}, surface_words[5] = {};
+};
+thread_local WorkerView tl_worker;
+
+inline uint8_t* Virt(uint32_t a) {
+  if (tl_worker.active && a - tl_worker.device < kDeviceShadowBytes) return tl_worker.shadow + (a - tl_worker.device);
+  return Mem()->TranslateVirtual(a);
+}
+
+// Big-endian dwords -> host order, four per SSSE3 shuffle (constants, fetch constants).
+inline void SwapCopy32(uint32_t* __restrict dst, const uint8_t* __restrict src, uint32_t count) {
+  const __m128i order = _mm_setr_epi8(3, 2, 1, 0, 7, 6, 5, 4, 11, 10, 9, 8, 15, 14, 13, 12);
+  uint32_t i = 0;
+  for (; i + 4 <= count; i += 4) {
+    __m128i v = _mm_loadu_si128(reinterpret_cast<const __m128i*>(src + i * 4));
+    _mm_storeu_si128(reinterpret_cast<__m128i*>(dst + i), _mm_shuffle_epi8(v, order));
+  }
+  for (; i < count; ++i) dst[i] = Be32(src + i * 4);
+}
+
+// SwapCopy32 that also keeps the source bytes (the constant change detector), in one pass.
+inline void SwapCopyKeep32(uint32_t* __restrict dst, uint8_t* __restrict keep, const uint8_t* __restrict src,
+                           uint32_t count) {
+  const __m128i order = _mm_setr_epi8(3, 2, 1, 0, 7, 6, 5, 4, 11, 10, 9, 8, 15, 14, 13, 12);
+  uint32_t i = 0;
+  for (; i + 4 <= count; i += 4) {
+    __m128i v = _mm_loadu_si128(reinterpret_cast<const __m128i*>(src + i * 4));
+    _mm_storeu_si128(reinterpret_cast<__m128i*>(keep + i * 4), v);
+    _mm_storeu_si128(reinterpret_cast<__m128i*>(dst + i), _mm_shuffle_epi8(v, order));
+  }
+  for (; i < count; ++i) {
+    std::memcpy(keep + i * 4, src + i * 4, 4);
+    dst[i] = Be32(src + i * 4);
+  }
+}
+
+// Guest index buffer -> host vertex indices: byte swap, (restart -> UINT32_MAX), + base vertex,
+// 24-bit wrap. Eight 16-bit or four 32-bit indices per step.
+void ConvertIndices(const uint8_t* src, bool is32, uint32_t count, bool restart, uint32_t reset,
+                    int32_t base_vertex, uint32_t* __restrict out) {
+  const __m128i base = _mm_set1_epi32(base_vertex), wrap = _mm_set1_epi32(0xFFFFFF);
+  const __m128i cut = _mm_set1_epi32(int(reset)), all = _mm_set1_epi32(-1);
+  auto finish = [&](__m128i v, __m128i masked) {
+    __m128i r = _mm_and_si128(_mm_add_epi32(v, base), wrap);
+    return restart ? _mm_blendv_epi8(r, all, _mm_cmpeq_epi32(masked, cut)) : r;
+  };
+  uint32_t i = 0;
+  if (is32) {
+    const __m128i order = _mm_setr_epi8(3, 2, 1, 0, 7, 6, 5, 4, 11, 10, 9, 8, 15, 14, 13, 12);
+    for (; i + 4 <= count; i += 4) {
+      __m128i v = _mm_shuffle_epi8(_mm_loadu_si128(reinterpret_cast<const __m128i*>(src + i * 4)), order);
+      _mm_storeu_si128(reinterpret_cast<__m128i*>(out + i), finish(v, _mm_and_si128(v, wrap)));
+    }
+  } else {
+    // Swap each 16-bit index and zero-extend it into a dword, low and high halves.
+    const __m128i lo = _mm_setr_epi8(1, 0, -1, -1, 3, 2, -1, -1, 5, 4, -1, -1, 7, 6, -1, -1);
+    const __m128i hi = _mm_setr_epi8(9, 8, -1, -1, 11, 10, -1, -1, 13, 12, -1, -1, 15, 14, -1, -1);
+    for (; i + 8 <= count; i += 8) {
+      __m128i v = _mm_loadu_si128(reinterpret_cast<const __m128i*>(src + i * 2));
+      __m128i a = _mm_shuffle_epi8(v, lo), b = _mm_shuffle_epi8(v, hi);
+      _mm_storeu_si128(reinterpret_cast<__m128i*>(out + i), finish(a, a));
+      _mm_storeu_si128(reinterpret_cast<__m128i*>(out + i + 4), finish(b, b));
+    }
+  }
+  const uint32_t mask = is32 ? 0xFFFFFFu : 0xFFFFu;
+  for (; i < count; ++i) {
+    uint32_t v = is32 ? Be32(src + i * 4) : Be16(src + i * 2);
+    out[i] = restart && (v & mask) == reset ? UINT32_MAX : uint32_t((v + uint32_t(base_vertex)) & 0xFFFFFF);
+  }
+}
 inline uint32_t LoadV(uint32_t a) { return Be32(Virt(a)); }
 inline float AsFloat(uint32_t v) {
   float f;
@@ -344,11 +426,52 @@ enum class Kind { kPoints, kLines, kTris, kRects };
 // capture, to the capture's trace.txt.
 #define BF2_TRACE(...) TraceLine(fmt::format(__VA_ARGS__))
 
+// Indices a draw can write straight into the index ring (no restart markers, host topology).
+struct DirectIndices {
+  const uint8_t* src = nullptr;  // guest index data, or nullptr for sequential vertices
+  bool is32 = false;
+  uint32_t count = 0;
+  int32_t base_vertex = 0;
+};
+
 class Renderer {
  public:
   std::array<uint32_t, 5> diagnostic_draw_args{}; // prim, base, start, count, indexed
   bool Init(HWND hwnd);
-  void Draw(uint32_t device, uint32_t prim, std::vector<uint32_t>& vids, const UpDraw* up);
+  void Draw(uint32_t device, uint32_t prim, std::vector<uint32_t>& vids, const UpDraw* up,
+            const DirectIndices* direct = nullptr);
+  bool Diagnosing() const { return frame_ == trace_frame_ || frame_ == capture_frame_; }
+
+  // --- Draw pipelining ---
+  // The game thread records each draw - its indices, shaders, the vertex data captured now and a
+  // copy of the device state the translation reads - and a worker thread translates and records
+  // it into the deferred context, so the game's own code and the translation overlap. Clears,
+  // resolves and swaps wait for the worker (Drain) and run on the game thread as before.
+  // BF2_PIPELINE=0 translates on the game thread.
+  struct MirrorOp {
+    uint32_t mirror_offset, bytes, pool_offset;
+    uint32_t data_offset;  // UINT32_MAX: copy from the pool; else bytes carried by the packet
+  };
+  struct DrawPacket {
+    uint32_t device = 0, prim = 0;
+    bool has_up = false;
+    UpDraw up;
+    std::vector<uint32_t> vids;
+    VsEntry* vs = nullptr;
+    PsEntry* ps = nullptr;
+    std::vector<uint8_t> state;                   // device bytes of `ranges`, in order
+    std::vector<std::array<uint32_t, 2>> ranges;  // device offset, bytes
+    std::vector<MirrorOp> ops;
+    std::vector<uint8_t> op_data;
+    uint32_t surfaces[5] = {}, surface_words[5] = {};
+  };
+  bool pipelined() const { return pipeline_on_; }
+  DrawPacket* AcquirePacket();
+  bool RecordDraw(DrawPacket& p);
+  void SubmitPacket(DrawPacket* p);
+  void ReleasePacket(DrawPacket* p);
+  void Drain();
+  void StartPipeline();
   void Clear(uint32_t device, uint32_t count, uint32_t rects, uint32_t flags, uint32_t color,
              float z, uint32_t stencil);
   void Resolve(uint32_t device, uint32_t flags, uint32_t src_rect, uint32_t dest_texture,
@@ -408,6 +531,25 @@ class Renderer {
   ComPtr<ID3D11Buffer> mirror_;
   ComPtr<ID3D11ShaderResourceView> mirror_srv_;
   std::vector<ChunkState> chunks_;
+  // Pipelining (see DrawPacket).
+  void WorkerMain();
+  void ExecutePacket(DrawPacket& p);
+  std::vector<MirrorOp>* recording_ = nullptr;  // SyncMirror records instead of issuing copies
+  std::vector<uint8_t>* recording_data_ = nullptr;
+  bool pipeline_on_ = false;
+  std::thread worker_;
+  std::mutex queue_lock_;
+  std::condition_variable queue_cv_, done_cv_;
+  std::deque<DrawPacket*> queue_;
+  std::vector<std::unique_ptr<DrawPacket>> packets_;
+  std::vector<DrawPacket*> free_packets_;
+  bool worker_busy_ = false, worker_waiting_ = false;
+  std::array<uint8_t, kDeviceShadowBytes> shadow_{};
+  // Game thread side: the device bytes the worker's shadow holds (packets carry only changes),
+  // packets recorded but not handed over yet, and spare packets.
+  std::array<uint8_t, kDeviceShadowBytes> sent_shadow_{};  // both start zeroed, change in step
+  std::vector<DrawPacket*> pending_, spare_;
+  void FlushPending();
   // Ranges unchanged for this many frames are write-protected instead of hashed every frame.
   static constexpr uint32_t kWatchAfterFrames = 30;
   WriteWatch watch_;
@@ -758,6 +900,192 @@ bool Renderer::Init(HWND hwnd) {
   return true;
 }
 
+void Renderer::StartPipeline() {
+  const char* env = std::getenv("BF2_PIPELINE");
+  pipeline_on_ = !(env && *env == '0');
+  if (!pipeline_on_) return;
+  worker_ = std::thread([this] { WorkerMain(); });
+  REXLOG_INFO("bf2native: draw translation pipelined on a worker thread");
+}
+
+Renderer::DrawPacket* Renderer::AcquirePacket() {
+  if (spare_.empty()) {
+    std::lock_guard lock(queue_lock_);
+    spare_.swap(free_packets_);
+    while (spare_.size() < 64) {
+      packets_.push_back(std::make_unique<DrawPacket>());
+      spare_.push_back(packets_.back().get());
+    }
+  }
+  DrawPacket* p = spare_.back();
+  spare_.pop_back();
+  p->has_up = false;
+  p->vids.clear();
+  p->state.clear();
+  p->ranges.clear();
+  p->ops.clear();
+  p->op_data.clear();
+  p->vs = nullptr;
+  p->ps = nullptr;
+  return p;
+}
+
+void Renderer::ReleasePacket(DrawPacket* p) { spare_.push_back(p); }
+
+// Game thread: everything the translation needs from guest memory, as it is now.
+bool Renderer::RecordDraw(DrawPacket& p) {
+  const uint32_t device = p.device;
+  ++draw_serial_;
+  p.vs = GetVertexShader(LoadV(device + dev::kVertexShader));
+  if (!p.vs) return false;
+  uint32_t program_cntl = Reg(device, 0x2180);
+  uint32_t param_gen = (program_cntl >> 18) & 1 ? (Reg(device, 0x2181) >> 8) & 0xFF : ~0u;
+  uint32_t ps_object = LoadV(device + dev::kPixelShader);
+  p.ps = ps_object ? GetPixelShader(ps_object, param_gen, false) : nullptr;
+  if (ps_object && !p.ps) return false;
+
+  // Vertex data: the same fetch constants and captures as Draw would make.
+  uint32_t xf[192];
+  SwapCopy32(xf, Virt(device + dev::kFetchConstants), 192);
+  if (p.has_up) {
+    uint32_t phys = PhysOf(p.up.vertices);
+    uint32_t bytes = p.up.vertex_count * p.up.stride;
+    xf[190] = (phys & ~3u) | 3u;
+    xf[191] = (((bytes + 3) / 4) << 2) | 2u;
+  }
+  for (uint32_t k = 0; k < 96; ++k) {
+    if ((xf[k / 3 * 6] & 3) == 2) continue;  // slot holds a texture fetch constant
+    uint32_t& d0 = xf[k * 2];
+    if ((d0 & 3) == 3 && (d0 & ~3u) >= kPhysicalSize) d0 = (PhysOf(d0 & ~3u) & 0x1FFFFFFCu) | 3u;
+  }
+  recording_ = &p.ops;
+  recording_data_ = &p.op_data;
+  for (uint32_t k = 0; k < 96; ++k) {
+    if (!((p.vs->info.vfetch_used[k >> 6] >> (k & 63)) & 1)) continue;
+    uint32_t d0 = xf[k * 2], d1 = xf[k * 2 + 1];
+    if ((d0 & 3) != 3) continue;
+    uint32_t bytes = ((d1 >> 2) & 0xFFFFFF) * 4;
+    SyncMirror(d0 & 0x1FFFFFFCu, std::min(bytes, 64u << 20), p.has_up && k == 95);
+  }
+  recording_ = nullptr;
+  recording_data_ = nullptr;
+
+  // Device state the translation reads: fetch, bool/loop and render state registers, surfaces,
+  // shaders, scissor, and the float constants the shaders use.
+  // Only blocks that differ from what the worker's shadow already holds travel with the packet.
+  const uint8_t* live = Virt(device);
+  auto add = [&](uint32_t offset, uint32_t bytes) {
+    constexpr uint32_t kBlock = 64;
+    uint32_t run_start = 0, run_bytes = 0;
+    auto flush = [&] {
+      if (!run_bytes) return;
+      p.ranges.push_back({run_start, run_bytes});
+      p.state.insert(p.state.end(), live + run_start, live + run_start + run_bytes);
+      std::memcpy(sent_shadow_.data() + run_start, live + run_start, run_bytes);
+      run_bytes = 0;
+    };
+    for (uint32_t at = offset; at < offset + bytes; at += kBlock) {
+      uint32_t n = std::min(kBlock, offset + bytes - at);
+      if (std::memcmp(live + at, sent_shadow_.data() + at, n) == 0) {
+        flush();
+        continue;
+      }
+      if (!run_bytes) run_start = at;
+      run_bytes += n;
+    }
+    flush();
+  };
+  add(dev::kFetchConstants, 192 * 4);
+  add(dev::kBoolLoopConstants, 40 * 4);
+  add(0x2C80, kDeviceShadowBytes - 0x2C80);
+  // Float constants change from draw to draw (matrices): sent as they are, not compared. The
+  // worker shadow gets them; sent_shadow_ is never consulted for these ranges.
+  auto add_always = [&](uint32_t offset, uint32_t bytes) {
+    p.ranges.push_back({offset, bytes});
+    p.state.insert(p.state.end(), live + offset, live + offset + bytes);
+  };
+  if (uint32_t n = p.vs->info.const_count) add_always(dev::kVsConstants, n * 16);
+  if (p.ps && p.ps->info.const_count) add_always(dev::kPsConstants, p.ps->info.const_count * 16);
+  for (int i = 0; i < 5; ++i) {
+    uint32_t surface = LoadV(device + (i < 4 ? dev::kColorSurfaces + i * 4 : dev::kDepthSurface));
+    p.surfaces[i] = surface;
+    p.surface_words[i] = surface ? LoadV(surface + 24) : 0;
+  }
+  return true;
+}
+
+void Renderer::SubmitPacket(DrawPacket* p) {
+  pending_.push_back(p);
+  if (pending_.size() >= 16) FlushPending();
+}
+
+// Hands the recorded packets to the worker, waking it only if it is idle.
+void Renderer::FlushPending() {
+  if (pending_.empty()) return;
+  std::unique_lock lock(queue_lock_);
+  // Bounded backlog: the game can't run further ahead than this many draws.
+  done_cv_.wait(lock, [&] { return queue_.size() < 4096; });
+  queue_.insert(queue_.end(), pending_.begin(), pending_.end());
+  pending_.clear();
+  if (worker_waiting_) queue_cv_.notify_one();
+}
+
+void Renderer::Drain() {
+  if (!pipeline_on_) return;
+  FlushPending();
+  std::unique_lock lock(queue_lock_);
+  done_cv_.wait(lock, [&] { return queue_.empty() && !worker_busy_; });
+}
+
+void Renderer::WorkerMain() {
+  std::vector<DrawPacket*> batch;
+  for (;;) {
+    {
+      std::unique_lock lock(queue_lock_);
+      for (DrawPacket* p : batch) free_packets_.push_back(p);
+      batch.clear();
+      worker_busy_ = false;
+      done_cv_.notify_all();
+      worker_waiting_ = true;
+      queue_cv_.wait(lock, [&] { return !queue_.empty(); });
+      worker_waiting_ = false;
+      batch.assign(queue_.begin(), queue_.end());
+      queue_.clear();
+      worker_busy_ = true;
+      done_cv_.notify_all();  // room in the backlog again
+    }
+    for (DrawPacket* p : batch) ExecutePacket(*p);
+  }
+}
+
+void Renderer::ExecutePacket(DrawPacket& p) {
+  size_t at = 0;
+  for (const auto& r : p.ranges) {
+    std::memcpy(shadow_.data() + r[0], p.state.data() + at, r[1]);
+    at += r[1];
+  }
+  for (const MirrorOp& op : p.ops) {
+    if (op.data_offset == UINT32_MAX) {
+      D3D11_BOX box{op.pool_offset, 0, 0, op.pool_offset + op.bytes, 1, 1};
+      ctx_->CopySubresourceRegion(mirror_.Get(), 0, op.mirror_offset, 0, 0, pool_.Get(), 0, &box);
+    } else {
+      D3D11_BOX box{op.mirror_offset, 0, 0, op.mirror_offset + op.bytes, 1, 1};
+      const uint8_t* src = p.op_data.data() + op.data_offset;
+      if (buggy_deferred_update_) src -= box.left;  // runtime emulation offsets pSrcData by the box
+      ctx_->UpdateSubresource(mirror_.Get(), 0, &box, src, 0, 0);
+    }
+  }
+  tl_worker.active = true;
+  tl_worker.device = p.device;
+  tl_worker.shadow = shadow_.data();
+  tl_worker.vs = p.vs;
+  tl_worker.ps = p.ps;
+  std::memcpy(tl_worker.surfaces, p.surfaces, sizeof(p.surfaces));
+  std::memcpy(tl_worker.surface_words, p.surface_words, sizeof(p.surface_words));
+  Draw(p.device, p.prim, p.vids, p.has_up ? &p.up : nullptr);
+  tl_worker.active = false;
+}
+
 bool Renderer::CreateUtility() {
   std::string util = kUtilHlsl, gs = kGsHlsl;
   auto vs = Compile(util, "vs_fs", "vs_5_0");
@@ -961,6 +1289,7 @@ Renderer::ShaderLookup* Renderer::LookupShader(uint64_t key, uint32_t object, bo
 }
 
 VsEntry* Renderer::GetVertexShader(uint32_t object) {
+  if (tl_worker.active) return static_cast<VsEntry*>(const_cast<void*>(tl_worker.vs));
   const auto& imm = LoadedImmediateVertexShader();
   if (object && imm.shader == object) {
     // Same condition as ReadUcode's: the patched copy is used while its declaration is current.
@@ -1003,6 +1332,7 @@ VsEntry* Renderer::GetVertexShaderSlow(uint32_t object) {
 }
 
 PsEntry* Renderer::GetPixelShader(uint32_t object, uint32_t param_gen_reg, bool depth20e4) {
+  if (tl_worker.active) return static_cast<PsEntry*>(const_cast<void*>(tl_worker.ps));
   void* hit;
   uint64_t key = uint64_t(object) | (uint64_t(param_gen_reg) << 32);
   if (depth20e4) key ^= 0xD2420E4A91F3B507ull;
@@ -1148,7 +1478,17 @@ HostRT* Renderer::GetRT(uint32_t base, uint32_t format, uint32_t w, uint32_t h, 
 // Size of a guest D3D surface object (+24: width-1 bits 0-12, height-1 bits 13-25).
 bool SurfaceSize(uint32_t surface, uint32_t& w, uint32_t& h) {
   if (!surface) return false;
-  uint32_t v = LoadV(surface + 24);
+  uint32_t v = 0;
+  bool found = false;
+  if (tl_worker.active) {
+    for (int i = 0; i < 5 && !found; ++i) {
+      if (tl_worker.surfaces[i] == surface) {
+        v = tl_worker.surface_words[i];
+        found = true;
+      }
+    }
+  }
+  if (!found) v = LoadV(surface + 24);
   w = (v & 0x1FFF) + 1;
   h = ((v >> 13) & 0x1FFF) + 1;
   return true;
@@ -1217,6 +1557,7 @@ void Renderer::BindTargets(const Targets& t, uint32_t color_mask) {
 //   are refreshed: a single capture gets the final contents, an uncaptured chunk is uploaded
 //   before the frame runs.
 void Renderer::SyncMirror(uint32_t address, uint32_t size, bool force) {
+  if (tl_worker.active) return;  // captured by the game thread when it recorded the draw
   PerfScope perf(1);
   if (!size) return;
   address &= 0x1FFFFFFFu;
@@ -1231,7 +1572,8 @@ void Renderer::SyncMirror(uint32_t address, uint32_t size, bool force) {
     if (pool_ && pool_used_ + bytes <= kPoolSize) {
       std::memcpy(pool_cpu_.data() + pool_used_, src, bytes);
       D3D11_BOX box{pool_used_, 0, 0, pool_used_ + bytes, 1, 1};
-      ctx_->CopySubresourceRegion(mirror_.Get(), 0, run_start << kChunkShift, 0, 0, pool_.Get(), 0, &box);
+      if (recording_) recording_->push_back({run_start << kChunkShift, bytes, pool_used_, UINT32_MAX});
+      else ctx_->CopySubresourceRegion(mirror_.Get(), 0, run_start << kChunkShift, 0, 0, pool_.Get(), 0, &box);
       for (uint32_t c = run_start; c < end_chunk; ++c) {
         ChunkState& s = chunks_[c];
         s.pool_offset = ++s.captures == 1 ? pool_used_ + ((c - run_start) << kChunkShift) : UINT32_MAX;
@@ -1239,8 +1581,14 @@ void Renderer::SyncMirror(uint32_t address, uint32_t size, bool force) {
       pool_used_ += bytes;
     } else {
       D3D11_BOX box{run_start << kChunkShift, 0, 0, end_chunk << kChunkShift, 1, 1};
-      if (buggy_deferred_update_) src -= box.left;  // runtime emulation offsets pSrcData by the box
-      ctx_->UpdateSubresource(mirror_.Get(), 0, &box, src, 0, 0);
+      if (recording_) {
+        // Pool full: the bytes travel with the draw.
+        recording_->push_back({box.left, bytes, 0, uint32_t(recording_data_->size())});
+        recording_data_->insert(recording_data_->end(), src, src + bytes);
+      } else {
+        if (buggy_deferred_update_) src -= box.left;  // runtime emulation offsets pSrcData by the box
+        ctx_->UpdateSubresource(mirror_.Get(), 0, &box, src, 0, 0);
+      }
       for (uint32_t c = run_start; c < end_chunk; ++c) {
         chunks_[c].captures += 2;  // not patchable later
         chunks_[c].pool_offset = UINT32_MAX;
@@ -1806,10 +2154,10 @@ bool ConvertPrimitives(uint32_t prim, const std::vector<uint32_t>& in, std::vect
 // --- Draw --------------------------------------------------------------------------------------
 
 void Renderer::Draw(uint32_t device, uint32_t prim, std::vector<uint32_t>& vids,
-                    const UpDraw* up) {
+                    const UpDraw* up, const DirectIndices* direct) {
   PerfScope perf(0);
   PerfScope prepare_perf(10);
-  ++draw_serial_;
+  if (!tl_worker.active) ++draw_serial_;  // pipelined: counted by the game thread
   ++frame_draws_;
   auto skip = [&](const char* why) {
     ++frame_skipped_;
@@ -1827,15 +2175,18 @@ void Renderer::Draw(uint32_t device, uint32_t prim, std::vector<uint32_t>& vids,
   const bool native_strip = prim == 0x06 || prim == 0x03;
   // Triangle/point lists without restart markers are already host lists: no copy needed.
   const bool native_list = (prim == 0x04 || prim == 0x01) &&
-                           std::find(vids.begin(), vids.end(), UINT32_MAX) == vids.end();
+                           (direct || std::find(vids.begin(), vids.end(), UINT32_MAX) == vids.end());
+  uint32_t index_count = direct ? direct->count : uint32_t(vids.size());
   if (native_strip) kind = prim == 0x06 ? Kind::kTris : Kind::kLines;
   else if (native_list) {
     kind = prim == 0x04 ? Kind::kTris : Kind::kPoints;
-    if (prim == 0x04) vids.resize(vids.size() / 3 * 3);
-    if (vids.empty()) return skip("primitive");
+    if (prim == 0x04) index_count = index_count / 3 * 3;
+    if (!direct) vids.resize(index_count);
+    if (!index_count) return skip("primitive");
   } else if (!ConvertPrimitives(prim, vids, indices, kind)) return skip("primitive");
   const auto& host_indices = native_strip || native_list ? vids : indices;
-  if (host_indices.size() > kIndexRingCount) return skip("too many indices");
+  if (!direct) index_count = uint32_t(host_indices.size());
+  if (index_count > kIndexRingCount) return skip("too many indices");
 
   uint32_t mode = Reg(device, 0x2205);
   if (kind == Kind::kTris && (mode & 3) == 3) return;  // both faces culled
@@ -1865,7 +2216,7 @@ void Renderer::Draw(uint32_t device, uint32_t prim, std::vector<uint32_t>& vids,
   uint8_t* d = Virt(device);
   for (int i = 0; i < 8; ++i) st.xb[i] = Be32(d + dev::kBoolLoopConstants + i * 4);
   for (int i = 0; i < 32; ++i) st.xl[i] = Be32(d + dev::kBoolLoopConstants + 32 + i * 4);
-  for (int i = 0; i < 192; ++i) st.xf[i] = Be32(d + dev::kFetchConstants + i * 4);
+  SwapCopy32(st.xf, d + dev::kFetchConstants, 192);
   if (up) {
     // UP draws read their vertices from the command buffer through vertex fetch constant 95.
     uint32_t phys = PhysOf(up->vertices);
@@ -1941,12 +2292,10 @@ void Renderer::Draw(uint32_t device, uint32_t prim, std::vector<uint32_t>& vids,
     D3D11_MAPPED_SUBRESOURCE m;
     snapshot.valid = snapshot.raw_valid = false;
     if (FAILED(ctx_->Map(buffer, 0, D3D11_MAP_WRITE_DISCARD, 0, &m))) return;
-    auto* out = static_cast<uint32_t*>(m.pData);
-    for (uint32_t i = 0; i < count * 4; ++i) out[i] = Be32(src + i * 4);
+    SwapCopyKeep32(static_cast<uint32_t*>(m.pData), snapshot.raw.data(), src, count * 4);
     ctx_->Unmap(buffer, 0);
     snapshot.valid = snapshot.raw_valid = true;  // the buffer now holds exactly these constants
     snapshot.raw_count = count;
-    std::memcpy(snapshot.raw.data(), src, bytes);
   };
   upload_guest_constants(vs_consts_.Get(), constant_snapshots_[0], d + dev::kVsConstants, vs->info.const_count);
   if (ps) {
@@ -2107,7 +2456,7 @@ void Renderer::Draw(uint32_t device, uint32_t prim, std::vector<uint32_t>& vids,
   };
   if (frame_ == trace_frame_) {
     BF2_TRACE("bf2trace: draw {} prim {} n {} vs {:08X} ps {:08X} keys {:016X} {:016X} rt {}x{} c0 {} fmt {} d {} vte {:X} vp {} {} {} {} mode {:X} dc {:X} blend0 {:08X} cmask {:X} cc {:X} pswr {:X} edram {}",
-                frame_draws_, prim, host_indices.size(), LoadV(device + dev::kVertexShader), ps_object, vs->key,
+                frame_draws_, prim, index_count, LoadV(device + dev::kVertexShader), ps_object, vs->key,
                 ps ? ps->key : 0,
                 t.width, t.height, t.color[0] ? 1 : 0, t.color[0] ? t.color[0]->guest_format : 99,
                 t.depth ? 1 : 0, Reg(device, 0x2206), vx, vy, vw, vh, mode, Reg(device, 0x2200),
@@ -2293,7 +2642,7 @@ void Renderer::Draw(uint32_t device, uint32_t prim, std::vector<uint32_t>& vids,
                                : kind == Kind::kLines ? D3D11_PRIMITIVE_TOPOLOGY_LINELIST
                                                       : D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
   if (pipeline_cache_.topology.Changed(topology)) ctx_->IASetPrimitiveTopology(topology);
-  uint32_t count = uint32_t(host_indices.size());
+  uint32_t count = index_count;
   D3D11_MAP map = D3D11_MAP_WRITE_NO_OVERWRITE;
   if (index_pos_ + count > kIndexRingCount || index_pos_ == kIndexRingCount) {
     index_pos_ = 0;
@@ -2304,7 +2653,14 @@ void Renderer::Draw(uint32_t device, uint32_t prim, std::vector<uint32_t>& vids,
     index_pos_=kIndexRingCount;  // retry with DISCARD if a previous upload failed
     return;
   }
-  std::memcpy(static_cast<uint32_t*>(m.pData) + index_pos_, host_indices.data(), count * 4);
+  uint32_t* ring = static_cast<uint32_t*>(m.pData) + index_pos_;
+  if (!direct) {
+    std::memcpy(ring, host_indices.data(), count * 4);
+  } else if (direct->src) {
+    ConvertIndices(direct->src, direct->is32, count, false, 0, direct->base_vertex, ring);
+  } else {
+    for (uint32_t i = 0; i < count; ++i) ring[i] = uint32_t(direct->base_vertex) + i;
+  }
   ctx_->Unmap(index_ring_.Get(), 0);
   if (!pipeline_cache_.fixed_bindings) ctx_->IASetIndexBuffer(index_ring_.Get(), DXGI_FORMAT_R32_UINT, 0);
 
@@ -2649,9 +3005,7 @@ void Renderer::Resolve(uint32_t device, uint32_t flags, uint32_t src_rect, uint3
 // without going through the guest views, so the watch can't be trusted.
 void Renderer::WatchMiss(const char* what, uint32_t address) {
   REXLOG_WARN("bf2native: {} {:08X} changed without a write callback; write watch disabled", what, address);
-  watch_.Disable();
-  for (auto& [k, t] : textures_) t.watched = false;
-  for (auto& c : chunks_) c.watched = false;
+  watch_.Disable();  // WatchClean is false from now on, whatever the entries' flags say
 }
 
 // Re-uploads textures sampled this frame whose guest memory the CPU changed since they were
@@ -3131,6 +3485,7 @@ bool RendererInit(void* hwnd) {
 #endif
   auto r = std::make_unique<Renderer>();
   if (!r->Init(static_cast<HWND>(hwnd))) return false;
+  r->StartPipeline();
   g_renderer = r.release();
   return true;
 }
@@ -3140,8 +3495,37 @@ void RendererDraw(uint32_t device, uint32_t prim, int32_t base_vertex, uint32_t 
   if (!g_renderer || !count) return;
   std::lock_guard<std::mutex> lock(g_renderer->mutex);
   g_renderer->diagnostic_draw_args = {prim, uint32_t(base_vertex), start, count, uint32_t(indexed)};
+  if (g_renderer->pipelined() && !g_renderer->Diagnosing()) {
+    auto* p = g_renderer->AcquirePacket();
+    p->device = device;
+    p->prim = prim;
+    if (indexed) {
+      uint32_t ib = LoadV(device + dev::kIndexBuffer);
+      uint32_t address = ib ? LoadV(ib + 0xC) : 0;
+      if (!address) return g_renderer->ReleasePacket(p);
+      bool is32 = LoadV(ib) >> 31;
+      bool restart = (Reg(device, 0x2205) >> 21) & 1;
+      uint32_t reset = Reg(device, 0x2103) & (is32 ? 0xFFFFFFu : 0xFFFFu);
+      p->vids.resize(count);
+      ConvertIndices(Virt(address + start * (is32 ? 4 : 2)), is32, count, restart, reset, base_vertex, p->vids.data());
+    } else {
+      p->vids.resize(count);
+      for (uint32_t i = 0; i < count; ++i) p->vids[i] = uint32_t(base_vertex) + i;
+    }
+    if (g_renderer->RecordDraw(*p)) g_renderer->SubmitPacket(p);
+    else g_renderer->ReleasePacket(p);
+    return;
+  }
+  g_renderer->Drain();
   static thread_local std::vector<uint32_t> vids;
-  vids.resize(count);
+  // Strips and lists without restart markers are converted straight into the index ring.
+  const bool direct_prim = prim == 0x06 || prim == 0x03 || prim == 0x04 || prim == 0x01;
+  const bool may_direct = direct_prim && !g_renderer->Diagnosing();
+  if (!indexed && may_direct) {
+    DirectIndices direct{nullptr, false, count, base_vertex};
+    g_renderer->Draw(device, prim, vids, nullptr, &direct);
+    return;
+  }
   if (indexed) {
     uint32_t ib = LoadV(device + dev::kIndexBuffer);
     if (!ib) return;
@@ -3151,22 +3535,15 @@ void RendererDraw(uint32_t device, uint32_t prim, int32_t base_vertex, uint32_t 
     uint32_t mode = Reg(device, 0x2205);
     bool restart = (mode >> 21) & 1;
     uint32_t reset = Reg(device, 0x2103) & (is32 ? 0xFFFFFFu : 0xFFFFu);
-    const uint8_t* p = Virt(address + start * (is32 ? 4 : 2));
-    // One branch-free loop per index size / restart mode, so the compiler can vectorize them.
-    uint32_t* out = vids.data();
-    auto convert = [&](auto load, uint32_t mask) {
-      if (restart) {
-        for (uint32_t i = 0; i < count; ++i) {
-          uint32_t v = load(i);
-          out[i] = (v & mask) == reset ? UINT32_MAX : uint32_t((v + uint32_t(base_vertex)) & 0xFFFFFF);
-        }
-      } else {
-        for (uint32_t i = 0; i < count; ++i) out[i] = uint32_t((load(i) + uint32_t(base_vertex)) & 0xFFFFFF);
-      }
-    };
-    if (is32) convert([p](uint32_t i) { return Be32(p + i * 4); }, 0xFFFFFFu);
-    else convert([p](uint32_t i) { return uint32_t(Be16(p + i * 2)); }, 0xFFFFu);
+    if (!restart && may_direct) {
+      DirectIndices direct{Virt(address + start * (is32 ? 4 : 2)), is32, count, base_vertex};
+      g_renderer->Draw(device, prim, vids, nullptr, &direct);
+      return;
+    }
+    vids.resize(count);
+    ConvertIndices(Virt(address + start * (is32 ? 4 : 2)), is32, count, restart, reset, base_vertex, vids.data());
   } else {
+    vids.resize(count);
     for (uint32_t i = 0; i < count; ++i) vids[i] = uint32_t(base_vertex) + i;
   }
   g_renderer->Draw(device, prim, vids, nullptr);
@@ -3175,6 +3552,26 @@ void RendererDraw(uint32_t device, uint32_t prim, int32_t base_vertex, uint32_t 
 void RendererDrawUp(uint32_t device, const UpDraw& up) {
   if (!g_renderer || !up.vertices || !up.stride) return;
   std::lock_guard<std::mutex> lock(g_renderer->mutex);
+  if (g_renderer->pipelined() && !g_renderer->Diagnosing()) {
+    if (up.indexed ? !up.indices || !up.index_count : !up.vertex_count) return;
+    auto* p = g_renderer->AcquirePacket();
+    p->device = device;
+    p->prim = up.prim;
+    p->has_up = true;
+    p->up = up;
+    if (up.indexed) {
+      p->vids.resize(up.index_count);
+      const uint8_t* src = Virt(up.indices);
+      for (uint32_t i = 0; i < up.index_count; ++i) p->vids[i] = up.index32 ? Be32(src + i * 4) : Be16(src + i * 2);
+    } else {
+      p->vids.resize(up.vertex_count);
+      for (uint32_t i = 0; i < up.vertex_count; ++i) p->vids[i] = i;
+    }
+    if (g_renderer->RecordDraw(*p)) g_renderer->SubmitPacket(p);
+    else g_renderer->ReleasePacket(p);
+    return;
+  }
+  g_renderer->Drain();
   static thread_local std::vector<uint32_t> vids;
   if (up.indexed) {
     if (!up.indices || !up.index_count) return;
@@ -3195,6 +3592,7 @@ void RendererClear(uint32_t device, uint32_t count, uint32_t rects, uint32_t fla
                    uint32_t color, float z, uint32_t stencil) {
   if (!g_renderer) return;
   std::lock_guard<std::mutex> lock(g_renderer->mutex);
+  g_renderer->Drain();
   g_renderer->Clear(device, count, rects, flags, color, z, stencil);
 }
 
@@ -3203,6 +3601,7 @@ void RendererResolve(uint32_t device, uint32_t flags, uint32_t src_rect, uint32_
                      float clear_z, uint32_t clear_stencil) {
   if (!g_renderer) return;
   std::lock_guard<std::mutex> lock(g_renderer->mutex);
+  g_renderer->Drain();
   g_renderer->Resolve(device, flags, src_rect, dest_texture, dest_point, level, slice, clear_color,
                       clear_z, clear_stencil);
 }
@@ -3214,6 +3613,7 @@ void RendererRequestCapture() {
 void RendererSwap(uint32_t device, uint32_t front_texture) {
   if (!g_renderer) return;
   std::lock_guard<std::mutex> lock(g_renderer->mutex);
+  g_renderer->Drain();
   g_renderer->Swap(device, front_texture);
 }
 

@@ -193,6 +193,30 @@ REX_HOOK_RAW(sub_824841C8) {
   }
 }
 
+// --- Register block emitters -------------------------------------------------------------------
+
+// sub_8248A128 / 8248A1E8 / 8248A2D8 (command buffer, dirty mask, register base, source): the state
+// flush (sub_8248B538) calls them to copy dirty register blocks - constants, fetch constants - from
+// the device's shadow into SET_CONSTANT packets. The packets are only ever read by a GPU; the
+// native renderer reads the shadow itself, so writing them is pure overhead (several % of the
+// render thread). The flush still clears its dirty masks. BF2_KEEP_PM4=1 emits them as before.
+namespace {
+bool KeepPm4() {
+  static const bool keep = std::getenv("BF2_KEEP_PM4") != nullptr;
+  return keep;
+}
+}  // namespace
+
+REX_HOOK_RAW(sub_8248A128) {
+  if (KeepPm4()) __imp__sub_8248A128(ctx, base);
+}
+REX_HOOK_RAW(sub_8248A1E8) {
+  if (KeepPm4()) __imp__sub_8248A1E8(ctx, base);
+}
+REX_HOOK_RAW(sub_8248A2D8) {
+  if (KeepPm4()) __imp__sub_8248A2D8(ctx, base);
+}
+
 // --- Shaders -----------------------------------------------------------------------------------
 
 // sub_8248AB00(device, patch, shader, ..., declaration [r7]): loads the vertex shader through the
