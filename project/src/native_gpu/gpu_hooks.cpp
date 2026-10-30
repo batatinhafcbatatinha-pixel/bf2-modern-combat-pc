@@ -356,8 +356,13 @@ REX_HOOK_RAW(sub_82484E48) {
   __imp__sub_82484E48(ctx, base);
 }
 
+namespace bf2_natives {
+void FrameTick();  // game_natives.cpp (BF2_NATIVE_AB)
+}
+
 // sub_82472D10(device, front_buffer_texture, params): Swap.
 REX_HOOK_RAW(sub_82472D10) {
+  bf2_natives::FrameTick();
   uint32_t device = ctx.r3.u32, front = ctx.r4.u32;
   EnsureRenderer();
   if (g_renderer_ready) bf2n::RendererSwap(device, front);

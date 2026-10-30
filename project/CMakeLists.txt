@@ -14,6 +14,7 @@ include(generated/rexglue.cmake)
 set(BF2MC_SOURCES
     src/main.cpp
     src/hooks.cpp
+    src/game_natives.cpp
     src/input_remap.cpp
     src/menu_hooks.cpp
     src/apt_menu.cpp
