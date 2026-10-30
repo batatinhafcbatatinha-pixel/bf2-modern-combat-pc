@@ -59,6 +59,11 @@
       }
     ]
   },
+  "sdk_linux": {
+    "url": "https://github.com/rexglue/rexglue-sdk/releases/download/nightly-20261002-bd833a2a/rexglue-sdk-0.10.0.24-dev.gbd833a2-linux-amd64.zip",
+    "sha256": "0a56565221a4e75f91fc71f787d9299a0d0298127b970c8a88a292f8d3a3befe",
+    "folder": "linux-amd64"
+  },
   "ffmpeg": {
     "commit": "0604b464c7cb4ebc94940cf1f324a3b26b87717c",
     "url": "https://codeload.github.com/wmarti/FFmpeg/tar.gz/0604b464c7cb4ebc94940cf1f324a3b26b87717c"

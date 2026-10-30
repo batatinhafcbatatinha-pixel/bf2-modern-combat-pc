@@ -54,6 +54,23 @@ python tools/play.py --game-files game_files
 
 `build_local.py` validates your files, downloads the pinned ReXGlue SDK nightly (`0.10.0.24-dev.gbd833a2`, SHA-256 checked) and applies the FPSCR patch in `patches/`, downloads the FFmpeg headers matching the SDK's `libavcodec`, translates your `default.xex` into private C++ under `.local/`, compiles the port, and removes any GPU emulation plugin from the output. `--reuse-generated` skips the translation on later builds.
 
+## Build on Linux
+
+The same kit builds a native Linux x86-64 executable, without Wine: the ReXGlue SDK's Linux package, the port's
+own renderer on Direct3D 11 through DXVK native (a Linux library implementing D3D11 on Vulkan), HLSL shaders
+compiled by vkd3d-shader, window and input through the SDK's SDL3. Requirements: Python 3.10+, Clang 20
+(`clang-20`/`clang++-20` are picked up), CMake 3.25+, Ninja, pkg-config, fontconfig and FreeType development
+files, a Vulkan driver, [DXVK native 3.1.1](https://github.com/doitsujin/dxvk/releases) and vkd3d-shader 1.19 or
+newer.
+
+```sh
+python3 tools/build_local.py --game-files game_files \
+  --dxvk-native-dir /path/to/dxvk-native/usr --vkd3d-dir /path/to/vkd3d-install
+python3 tools/play.py --game-files game_files
+```
+
+The build copies the SDK runtime, DXVK native and vkd3d-shader next to the executable (it finds them there).
+
 ## Controls
 
 Modern layout after Battlefield 6's defaults (during gameplay only; menus keep the original A = select, B = back). Pass `--bf2_modern_controls=false` after `play.py` for the original console layout.

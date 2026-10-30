@@ -8,6 +8,10 @@
 // the scene alone. Forced every frame before sub_8233C608 schedules the passes; the game's value
 // is put back when the effect is turned on again.
 // Not verified in game (static analysis only).
+#ifndef _WIN32
+#include <windows.h>
+#include "platform/native_win32_posix.h"
+#endif
 #include "generated/default/bf2mc_init.h"
 
 #include <atomic>

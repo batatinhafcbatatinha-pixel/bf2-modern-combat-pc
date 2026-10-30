@@ -18,8 +18,13 @@ inline void* WindowHandle(rex::ui::Window* window) {
 #ifdef _WIN32
   return window->GetNativeWindowHandle();
 #else
-  // Requires a DXVK native build with the SDL3 WSI, not SDL2.
-  return window->GetSDLWindowHandle();
+  // The SDL3 window (DXVK native's SDL3 WSI takes SDL_Window*): the game's only window.
+  (void)window;
+  int count = 0;
+  SDL_Window** windows = SDL_GetWindows(&count);
+  void* handle = windows && count > 0 ? windows[0] : nullptr;
+  SDL_free(windows);
+  return handle;
 #endif
 }
 inline std::filesystem::path ExecutableDirectory() {

@@ -9,6 +9,9 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#ifndef _WIN32
+#include "platform/native_win32_posix.h"
+#endif
 
 #include <algorithm>
 #include <atomic>

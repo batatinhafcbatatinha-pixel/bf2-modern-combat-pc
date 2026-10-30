@@ -7,6 +7,12 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     find_library(NATIVE_DXVK_D3D11 NAMES dxvk_d3d11 HINTS "${DXVK_NATIVE_DIR}/lib" "${DXVK_NATIVE_DIR}/lib64" REQUIRED)
     find_library(NATIVE_DXVK_DXGI NAMES dxvk_dxgi HINTS "${DXVK_NATIVE_DIR}/lib" "${DXVK_NATIVE_DIR}/lib64" REQUIRED)
     add_library(native_shader_compiler STATIC "${CMAKE_CURRENT_LIST_DIR}/native_shader_compiler.cpp")
+    # The Win32 subset the PC settings screen uses (GDI text through FreeType/fontconfig, ini files, process).
+    target_sources(native_shader_compiler PRIVATE "${CMAKE_CURRENT_LIST_DIR}/native_win32_posix.cpp")
+    pkg_check_modules(NATIVE_TEXT REQUIRED IMPORTED_TARGET fontconfig freetype2)
+    target_link_libraries(native_shader_compiler PRIVATE PkgConfig::NATIVE_TEXT)
+    # DT_RPATH, not RUNPATH: DXVK native dlopen()s libSDL3.so.0 and must find it next to the executable too.
+    target_link_options(native_shader_compiler INTERFACE -Wl,--disable-new-dtags)
     set_target_properties(native_shader_compiler PROPERTIES POSITION_INDEPENDENT_CODE ON)
     target_compile_features(native_shader_compiler PUBLIC cxx_std_17)
     target_compile_options(native_shader_compiler PUBLIC -fms-extensions)

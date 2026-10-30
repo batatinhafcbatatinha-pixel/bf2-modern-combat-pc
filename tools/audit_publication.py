@@ -14,7 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 KIT = json.loads((ROOT / 'kit.json').read_text(encoding='utf-8'))
 ALLOWED = {'.c', '.h', '.cpp', '.hpp', '.inc', '.hlsl', '.cmake', '.txt', '.md', '.py', '.json',
            '.toml', '.cmd', '.ps1', '.sh', '.yml', '.yaml', '.patch'}
-ROOT_FILES = {'.gitignore', '.gitattributes', 'LICENSE', 'NOTICE'}
+ROOT_FILES = {'.gitignore', '.gitattributes', '.gitmodules', 'LICENSE', 'NOTICE'}
 FORBIDDEN_PARTS = {'.local', 'game_files', 'generated', 'gen', 'out', 'output', 'build', 'dist',
                    'runs', 'analysis', '__pycache__', 'assets'}
 # Executables/archives/images/audio: PE, XBE, XEX2, ELF, ZIP, PNG, RIFF, DDS, EA BIG, 7z, gzip.
@@ -26,10 +26,22 @@ GENERATED_MARKERS = (b'#define RECOMP_' + b'GENERATED_CODE', b'DEFINE_REX_' + b'
 MAX_BYTES = 512 * 1024
 
 
+def submodules():
+    """Submodule paths (e.g. tools/port-installer): separate repositories with their own audit."""
+    if not (ROOT / '.gitmodules').is_file():
+        return set()
+    out = subprocess.run(['git', 'config', '--file', '.gitmodules', '--get-regexp', r'\.path$'], cwd=ROOT,
+                         capture_output=True, text=True).stdout
+    return {line.split(' ', 1)[1].strip() for line in out.splitlines() if ' ' in line}
+
+
 def audited_files():
     names = subprocess.check_output(['git', 'ls-files', '-z'], cwd=ROOT).decode('utf-8').split('\0')
+    skip = submodules()
     files = []
     for name in filter(None, names):
+        if name in skip:
+            continue
         path = PurePosixPath(name)
         if path.is_absolute() or '..' in path.parts or any(part in FORBIDDEN_PARTS for part in path.parts):
             raise ValueError('Forbidden publication path: ' + name)

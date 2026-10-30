@@ -22,6 +22,8 @@ sys.path.insert(0, str(ROOT / 'tools'))
 import validate_game  # noqa: E402
 
 SDK = KIT['sdk']
+if os.name != 'nt' and 'sdk_linux' in KIT:
+    SDK = {**SDK, **KIT['sdk_linux']}  # same SDK build, Linux package; the header patches still apply
 FFMPEG = KIT['ffmpeg']
 DXVK = KIT.get('dxvk')
 
@@ -125,6 +127,34 @@ def prepare_project(local, game_files, ffmpeg):
     return project
 
 
+def linux_runtime_files(build, sdk, args):
+    """Next to the executable (its RPATH is $ORIGIN): the SDK runtime, DXVK native and vkd3d-shader. DXVK's SDL3
+    WSI opens libSDL3.so.0; the SDK runtime carries SDL3 itself, so that name points at the runtime and both share
+    one SDL (and one window)."""
+    names = {'librexruntime', 'librexruntimerd', 'librexruntimed', 'libTracyClient', 'libTracyClientrd', 'libTracyClientd'}
+    needed = subprocess.run(['ldd', str(build / KIT['target'])], capture_output=True, text=True).stdout
+    for lib in sorted((sdk / 'lib').glob('*.so')):
+        if lib.stem in names and lib.name in needed:
+            shutil.copy2(lib, build / lib.name)
+    runtime = next((build / n for n in ('librexruntimerd.so', 'librexruntime.so', 'librexruntimed.so') if (build / n).is_file()), None)
+    dxvk = args.dxvk_native_dir.resolve()
+    for name in ('libdxvk_d3d11.so.0', 'libdxvk_dxgi.so.0'):
+        source = next((p for p in (dxvk / 'lib' / name, dxvk / 'lib64' / name) if p.exists()), None)
+        if source:
+            shutil.copy2(source, build / name)
+    if args.vkd3d_dir:
+        for d in ('lib', 'lib64', 'lib/x86_64-linux-gnu'):
+            source = args.vkd3d_dir.resolve() / d / 'libvkd3d-shader.so.1'
+            if source.exists():
+                shutil.copy2(source, build / source.name)
+                break
+    if runtime:
+        link = build / 'libSDL3.so.0'
+        if link.is_symlink() or link.exists():
+            link.unlink()
+        link.symlink_to(runtime.name)
+
+
 def developer_environment():
     """MSVC headers/libraries for clang on Windows (from the Visual Studio vcvars64 script)."""
     if os.name != 'nt' or os.environ.get('VCToolsInstallDir'):
@@ -149,6 +179,8 @@ def main():
     parser.add_argument('--local-dir', type=Path, default=ROOT / '.local')
     parser.add_argument('--sdk-dir', type=Path, help=f'Existing ReXGlue SDK {SDK["version"]} install (default: download the pinned build)')
     parser.add_argument('--llvm-dir', type=Path, help='LLVM install folder containing bin/clang++ (default: PATH)')
+    parser.add_argument('--dxvk-native-dir', type=Path, help='Linux: DXVK native prefix (include/dxvk, lib/libdxvk_d3d11.so)')
+    parser.add_argument('--vkd3d-dir', type=Path, help='Linux: vkd3d prefix with libvkd3d-shader 1.19+ (lib/pkgconfig)')
     parser.add_argument('--reuse-generated', action='store_true', help='Skip the translation step after a completed one')
     parser.add_argument('--jobs', type=int, default=max(1, (os.cpu_count() or 4) - 2))
     args = parser.parse_args()
@@ -165,6 +197,15 @@ def main():
     exe = '.exe' if os.name == 'nt' else ''
     clang = shutil.which('clang' + exe, path=env.get('PATH'))
     clangxx = shutil.which('clang++' + exe, path=env.get('PATH'))
+    if os.name != 'nt':
+        # The SDK's headers need Clang 20; distributions often install it as clang-20.
+        clang = shutil.which('clang-20', path=env.get('PATH')) or clang
+        clangxx = shutil.which('clang++-20', path=env.get('PATH')) or clangxx
+        if not args.dxvk_native_dir:
+            raise ValueError('Linux: pass --dxvk-native-dir (DXVK native 3.1.1, D3D11 on Vulkan) and --vkd3d-dir')
+        if args.vkd3d_dir:
+            pkg = [str(args.vkd3d_dir.resolve() / d / 'pkgconfig') for d in ('lib', 'lib64', 'lib/x86_64-linux-gnu')]
+            env['PKG_CONFIG_PATH'] = os.pathsep.join(pkg + [env.get('PKG_CONFIG_PATH', '')])
     cmake = shutil.which('cmake', path=env.get('PATH'))
     ninja = shutil.which('ninja', path=env.get('PATH'))
     if not (clang and clangxx and cmake and ninja):
@@ -181,11 +222,14 @@ def main():
     run([cmake, '-S', project, '-B', build, '-G', 'Ninja', '-DCMAKE_BUILD_TYPE=RelWithDebInfo',
          '-DCMAKE_C_COMPILER=' + clang, '-DCMAKE_CXX_COMPILER=' + clangxx,
          '-DCMAKE_PREFIX_PATH=' + sdk.as_posix(),
-         *(['-DDXVK_DIR=' + prepare_dxvk(local).as_posix()] if DXVK else [])], local, env)
+         *(['-DDXVK_DIR=' + prepare_dxvk(local).as_posix()] if DXVK and os.name == 'nt' else []),
+         *(['-DDXVK_NATIVE_DIR=' + args.dxvk_native_dir.resolve().as_posix()] if os.name != 'nt' else [])], local, env)
     run([cmake, '--build', build, '--parallel', str(args.jobs), '--target', KIT['target'], *KIT.get('extra_targets', [])], local, env)
     # The port renders and plays audio natively: never ship the SDK's GPU emulation plugin next to it.
-    for plugin in build.glob('rexgpu-*'):
+    for plugin in [*build.glob('rexgpu-*'), *build.glob('librexgpu-*')]:
         plugin.unlink()
+    if os.name != 'nt':
+        linux_runtime_files(build, sdk, args)
     print('Built privately in', build)
     print('Play with: python tools/play.py --game-files', game_files)
     print('Do not upload .local/, the generated code or the executable.')

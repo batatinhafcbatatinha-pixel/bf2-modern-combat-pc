@@ -5,6 +5,7 @@
 #include <unknwn.h>
 #include <utility>
 #include <memory>
+#include <type_traits>
 
 namespace Microsoft::WRL {
 // The subset of WRL used by the renderers, with DXVK native's COM ABI.
@@ -15,6 +16,11 @@ template <class T> class ComPtr {
   ComPtr(T* value) : pointer_(value) { if (pointer_) pointer_->AddRef(); }
   ComPtr(const ComPtr& other) : ComPtr(other.pointer_) {}
   ComPtr(ComPtr&& other) noexcept : pointer_(other.Detach()) {}
+  // Upcasts, as WRL allows (ComPtr<ID3D11Texture2D> -> ComPtr<ID3D11Resource>).
+  template <class U, class = std::enable_if_t<std::is_convertible_v<U*, T*>>>
+  ComPtr(const ComPtr<U>& other) : ComPtr(static_cast<T*>(other.Get())) {}
+  template <class U, class = std::enable_if_t<std::is_convertible_v<U*, T*>>>
+  ComPtr& operator=(const ComPtr<U>& other) { ComPtr copy(other); Swap(copy); return *this; }
   ~ComPtr() { Reset(); }
   ComPtr& operator=(const ComPtr& other) {
     if (this != std::addressof(other)) { ComPtr copy(other); Swap(copy); }
@@ -51,4 +57,9 @@ template <class T> class ComPtr {
   T* pointer_ = nullptr;
 };
 }
+// The 4-argument D3D11_ENCODE_BASIC_FILTER of DXVK native's headers takes the comparison flag where the
+// Windows SDK takes the reduction type; standard filtering is 0 in both.
+#ifndef D3D11_FILTER_REDUCTION_TYPE_STANDARD
+#define D3D11_FILTER_REDUCTION_TYPE_STANDARD 0
+#endif
 #endif

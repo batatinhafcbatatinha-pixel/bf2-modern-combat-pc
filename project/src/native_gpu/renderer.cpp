@@ -22,7 +22,12 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
+#ifndef _WIN32
+#include "../platform/native_win32_posix.h"
+#endif
+#ifdef _WIN32
 #include <timeapi.h>
+#endif
 
 #include <d3d11_1.h>
 #include <d3d11sdklayers.h>
