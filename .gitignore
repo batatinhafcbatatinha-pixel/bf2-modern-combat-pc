@@ -28,3 +28,8 @@ game_files/
 game_files/
 .game-install.lock
 game-install-report.json
+
+# Local game data and installer outputs
+game_files/
+.game-install.lock
+game-install-report.json
