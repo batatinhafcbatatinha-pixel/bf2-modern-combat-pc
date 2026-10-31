@@ -13,7 +13,7 @@ import zipfile
 ROOT = Path(__file__).resolve().parents[1]
 KIT = json.loads((ROOT / 'kit.json').read_text(encoding='utf-8'))
 ALLOWED = {'.c', '.h', '.cpp', '.hpp', '.inc', '.hlsl', '.cmake', '.txt', '.md', '.py', '.json',
-           '.toml', '.cmd', '.ps1', '.sh', '.yml', '.yaml', '.patch'}
+           '.toml', '.cmd', '.ps1', '.sh', '.yml', '.yaml', '.patch', '.m'}
 ROOT_FILES = {'.gitignore', '.gitattributes', '.gitmodules', 'LICENSE', 'NOTICE'}
 FORBIDDEN_PARTS = {'.local', 'game_files', 'generated', 'gen', 'out', 'output', 'build', 'dist',
                    'runs', 'analysis', '__pycache__', 'assets'}

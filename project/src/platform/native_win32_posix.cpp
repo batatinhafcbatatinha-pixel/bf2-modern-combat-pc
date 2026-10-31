@@ -6,6 +6,10 @@
 
 #include <SDL3/SDL.h>
 #include <fontconfig/fontconfig.h>
+#ifdef __APPLE__
+#include <crt_externs.h>
+#include <mach-o/dyld.h>
+#endif
 #include <ft2build.h>
 #include FT_FREETYPE_H
 
@@ -508,10 +512,16 @@ BOOL WritePrivateProfileStringW(const wchar_t* section, const wchar_t* key, cons
 
 DWORD GetModuleFileNameA(HMODULE, char* out, DWORD n) {
   if (!out || !n) return 0;
+#ifdef __APPLE__
+  uint32_t size = n;
+  if (_NSGetExecutablePath(out, &size) != 0) { g_last_error = 122; out[0] = 0; return 0; }
+  return DWORD(std::strlen(out));
+#else
   ssize_t len = readlink("/proc/self/exe", out, n - 1);
   if (len < 0) { g_last_error = DWORD(errno); out[0] = 0; return 0; }
   out[len] = 0;
   return DWORD(len);
+#endif
 }
 
 DWORD GetModuleFileNameW(HMODULE m, wchar_t* out, DWORD n) {
@@ -526,8 +536,16 @@ DWORD GetModuleFileNameW(HMODULE m, wchar_t* out, DWORD n) {
 
 const wchar_t* GetCommandLineW() {
   static const std::wstring line = [] {
+#ifdef __APPLE__
+    std::string raw;
+    for (int i = 0; i < *_NSGetArgc(); ++i) {
+      raw += (*_NSGetArgv())[i];
+      raw.push_back('\0');
+    }
+#else
     std::ifstream f("/proc/self/cmdline", std::ios::binary);
     std::string raw((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+#endif
     std::replace(raw.begin(), raw.end(), '\0', '\x1f');  // argument separator, see CreateProcessW
     return Widen(raw);
   }();

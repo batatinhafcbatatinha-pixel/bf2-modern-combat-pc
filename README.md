@@ -15,7 +15,7 @@ An experimental port of the Xbox 360 version of Battlefield 2: Modern Combat, bu
 - Mouse look turns the camera directly (it does not go through the emulated right stick, so there is no stick curve, acceleration or turn-rate cap); aiming follows the right mouse button reliably.
 - In-game PC options (F1): display mode, internal resolution, vsync, frame limit, FXAA, MSAA (off, 2x, 4x or 8x; applies at once), anisotropic filtering, aspect, volume.
 - Known issues: ground and scenery textures shimmer while the camera moves (under investigation; likely the missing MSAA); translucent streaks from some particle effects (when the player is hit or near explosions); the first mission load can take 1–2 minutes while shaders compile; the game's own aim-sensitivity option does not affect the mouse yet; the stance controls (crouch/prone toggles) are new and not fully tested; multiplayer is not supported.
-- Windows x64 only for now.
+- Tested on Windows x64; a Linux build path exists. Experimental [macOS](MACOS.md) build files are included; they have not been compiled or run yet.
 
 ## Why a native port instead of an emulator
 
@@ -70,6 +70,10 @@ python3 tools/play.py --game-files game_files
 ```
 
 The build copies the SDK runtime, DXVK native and vkd3d-shader next to the executable (it finds them there).
+
+## Build on macOS
+
+Experimental and not compiled or run yet: see [MACOS.md](MACOS.md).
 
 ## Controls
 

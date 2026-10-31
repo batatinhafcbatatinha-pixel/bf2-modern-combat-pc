@@ -11,6 +11,9 @@
 #ifndef _WIN32
 #include <SDL3/SDL.h>
 #endif
+#ifdef __APPLE__
+#include <mach-o/dyld.h>
+#endif
 
 namespace native_host {
 inline void* WindowHandle(rex::ui::Window* window) {
@@ -18,7 +21,7 @@ inline void* WindowHandle(rex::ui::Window* window) {
 #ifdef _WIN32
   return window->GetNativeWindowHandle();
 #else
-  // The SDL3 window (DXVK native's SDL3 WSI takes SDL_Window*): the game's only window.
+  // The SDL3 window (DXVK native's SDL3 WSI and the macOS DXMT bridge take SDL_Window*): the game's only window.
   (void)window;
   int count = 0;
   SDL_Window** windows = SDL_GetWindows(&count);
@@ -32,6 +35,10 @@ inline std::filesystem::path ExecutableDirectory() {
   wchar_t path[32768]{};
   const auto size = GetModuleFileNameW(nullptr, path, 32768);
   if (size && size < 32768) return std::filesystem::path(path).parent_path();
+#elif defined(__APPLE__)
+  char path[4096]{};
+  uint32_t size = sizeof(path);
+  if (_NSGetExecutablePath(path, &size) == 0) return std::filesystem::path(path).parent_path();
 #else
   std::error_code error;
   auto path = std::filesystem::read_symlink("/proc/self/exe", error);

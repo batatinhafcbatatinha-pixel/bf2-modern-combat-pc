@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import platform
 import sys
 import tarfile
 import urllib.request
@@ -22,7 +23,10 @@ sys.path.insert(0, str(ROOT / 'tools'))
 import validate_game  # noqa: E402
 
 SDK = KIT['sdk']
-if os.name != 'nt' and 'sdk_linux' in KIT:
+MACOS = sys.platform == 'darwin'
+if MACOS:
+    SDK = {**SDK, **KIT['sdk_mac']}  # same SDK build, x86-64 macOS package
+elif os.name != 'nt' and 'sdk_linux' in KIT:
     SDK = {**SDK, **KIT['sdk_linux']}  # same SDK build, Linux package; the header patches still apply
 FFMPEG = KIT['ffmpeg']
 DXVK = KIT.get('dxvk')
@@ -155,6 +159,14 @@ def linux_runtime_files(build, sdk, args):
         link.symlink_to(runtime.name)
 
 
+def macos_runtime_files(build, sdk, args):
+    """Next to the executable (its rpath is @executable_path): the SDK runtime, DXMT and vkd3d-shader."""
+    for folder in (sdk / 'lib', args.dxmt_dir.resolve() / 'lib', args.vkd3d_dir.resolve() / 'lib'):
+        for lib in folder.glob('*.dylib'):
+            if not lib.name.startswith('librexgpu'):
+                shutil.copy2(lib, build / lib.name)
+
+
 def developer_environment():
     """MSVC headers/libraries for clang on Windows (from the Visual Studio vcvars64 script)."""
     if os.name != 'nt' or os.environ.get('VCToolsInstallDir'):
@@ -180,10 +192,13 @@ def main():
     parser.add_argument('--sdk-dir', type=Path, help=f'Existing ReXGlue SDK {SDK["version"]} install (default: download the pinned build)')
     parser.add_argument('--llvm-dir', type=Path, help='LLVM install folder containing bin/clang++ (default: PATH)')
     parser.add_argument('--dxvk-native-dir', type=Path, help='Linux: DXVK native prefix (include/dxvk, lib/libdxvk_d3d11.so)')
-    parser.add_argument('--vkd3d-dir', type=Path, help='Linux: vkd3d prefix with libvkd3d-shader 1.19+ (lib/pkgconfig)')
+    parser.add_argument('--vkd3d-dir', type=Path, help='Linux, macOS: vkd3d prefix with libvkd3d-shader 1.19+ (lib/pkgconfig)')
+    parser.add_argument('--dxmt-dir', type=Path, help='macOS: DXMT prefix from tools/macos/build-deps.sh')
     parser.add_argument('--reuse-generated', action='store_true', help='Skip the translation step after a completed one')
     parser.add_argument('--jobs', type=int, default=max(1, (os.cpu_count() or 4) - 2))
     args = parser.parse_args()
+    if MACOS and platform.machine() != 'x86_64':
+        raise ValueError('macOS: run this as x86-64: arch -x86_64 /usr/local/bin/python3 tools/build_local.py ...')
 
     game_files = args.game_files.resolve()
     problems = validate_game.validate(game_files)
@@ -201,7 +216,9 @@ def main():
         # The SDK's headers need Clang 20; distributions often install it as clang-20.
         clang = shutil.which('clang-20', path=env.get('PATH')) or clang
         clangxx = shutil.which('clang++-20', path=env.get('PATH')) or clangxx
-        if not args.dxvk_native_dir:
+        if MACOS and not (args.dxmt_dir and args.vkd3d_dir):
+            raise ValueError('macOS: pass --dxmt-dir and --vkd3d-dir (see MACOS.md)')
+        if not MACOS and not args.dxvk_native_dir:
             raise ValueError('Linux: pass --dxvk-native-dir (DXVK native 3.1.1, D3D11 on Vulkan) and --vkd3d-dir')
         if args.vkd3d_dir:
             pkg = [str(args.vkd3d_dir.resolve() / d / 'pkgconfig') for d in ('lib', 'lib64', 'lib/x86_64-linux-gnu')]
@@ -223,12 +240,15 @@ def main():
          '-DCMAKE_C_COMPILER=' + clang, '-DCMAKE_CXX_COMPILER=' + clangxx,
          '-DCMAKE_PREFIX_PATH=' + sdk.as_posix(),
          *(['-DDXVK_DIR=' + prepare_dxvk(local).as_posix()] if DXVK and os.name == 'nt' else []),
-         *(['-DDXVK_NATIVE_DIR=' + args.dxvk_native_dir.resolve().as_posix()] if os.name != 'nt' else [])], local, env)
+         *(['-DDXMT_DIR=' + args.dxmt_dir.resolve().as_posix(), '-DCMAKE_OSX_ARCHITECTURES=x86_64'] if MACOS else []),
+         *(['-DDXVK_NATIVE_DIR=' + args.dxvk_native_dir.resolve().as_posix()] if os.name != 'nt' and not MACOS else [])], local, env)
     run([cmake, '--build', build, '--parallel', str(args.jobs), '--target', KIT['target'], *KIT.get('extra_targets', [])], local, env)
     # The port renders and plays audio natively: never ship the SDK's GPU emulation plugin next to it.
     for plugin in [*build.glob('rexgpu-*'), *build.glob('librexgpu-*')]:
         plugin.unlink()
-    if os.name != 'nt':
+    if MACOS:
+        macos_runtime_files(build, sdk, args)
+    elif os.name != 'nt':
         linux_runtime_files(build, sdk, args)
     print('Built privately in', build)
     print('Play with: python tools/play.py --game-files', game_files)
