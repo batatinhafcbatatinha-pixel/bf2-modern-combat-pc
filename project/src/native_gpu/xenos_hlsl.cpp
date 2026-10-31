@@ -1261,6 +1261,11 @@ XPSOut main(XVSOut xi, bool xface : SV_IsFrontFace) {
   xr.c1 = oc1 * xsys[4].y;
   xr.c2 = oc2 * xsys[4].z;
   xr.c3 = oc3 * xsys[4].w;
+  // 7e3 render targets (xsys[7]): RGB in [0, 31.875], alpha in [0, 1].
+  if (xsys[7].x != 0.0) xr.c0 = float4(clamp(xr.c0.rgb, 0.0, 31.875), saturate(xr.c0.a));
+  if (xsys[7].y != 0.0) xr.c1 = float4(clamp(xr.c1.rgb, 0.0, 31.875), saturate(xr.c1.a));
+  if (xsys[7].z != 0.0) xr.c2 = float4(clamp(xr.c2.rgb, 0.0, 31.875), saturate(xr.c2.a));
+  if (xsys[7].w != 0.0) xr.c3 = float4(clamp(xr.c3.rgb, 0.0, 31.875), saturate(xr.c3.a));
 )";
     if (opt_.depth20e4) h << "  xr.depth = xdepth20e4(odepth);\n";
     else if (info_.writes_depth) h << "  xr.depth = saturate(odepth);\n";

@@ -2274,6 +2274,14 @@ void Renderer::Draw(uint32_t device, uint32_t prim, std::vector<uint32_t>& vids,
   sys[22] = float(point_size >> 16) * 2.0f / 16.0f;
   sys[23] = float(point_size & 0xFFFF) * 2.0f / 16.0f;
   sys[24] = 1.0f / t.scale;  // host pixels -> guest pixels (pixel position parameter)
+  // The guest's 2_10_10_10_FLOAT targets hold 7e3 RGB (no sign, below 32) and unorm alpha; the host
+  // stand-in is 16-bit float, so the limits of the real storage are applied to the shader output.
+  // The game depends on it: its exposure chain writes ln(luminance) to such a target, which only
+  // works out to the exposure the levels were tuned for when the negative values are lost.
+  static const bool keep_7e3_range = !std::getenv("BF2_NO_7E3_CLAMP");
+  for (int i = 0; i < 4; ++i) {
+    if (keep_7e3_range && t.color[i] && t.color[i]->guest_format == 3) sys[28 + i] = 1.0f;
+  }
   std::memcpy(st.xsys, sys.data(), sizeof(st.xsys));
   st.xsys[8] = ((vte >> 8) & 1) | (((vte >> 9) & 1) << 1) | (((vte >> 10) & 1) << 2);
   st.xsys[12] = (colorcontrol & 8) ? (colorcontrol & 7) : 7u;
