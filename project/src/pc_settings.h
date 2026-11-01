@@ -32,6 +32,7 @@ struct ID3D11ShaderResourceView;
 struct ID3D11RenderTargetView;
 struct IDXGISwapChain1;
 struct IDXGIAdapter1;
+namespace rex { struct RuntimeConfig; }
 
 namespace pcs {
 
@@ -165,6 +166,9 @@ struct GameInfo {
   // Football games: the keyboard plays as the controller with the EA SPORTS FC 27 "WASD"
   // layout (basic actions only), unless the ini has teclado=0.
   bool football_keyboard = false;
+  // Any other game: its keyboard layout as {SDK flag, keys} pairs (same ini switch).
+  const char* const (*keybinds)[2] = nullptr;
+  int keybind_count = 0;
   const Theme* theme = nullptr;  // caller-owned, must outlive the renderer
   const Effect* effects = nullptr;  // caller-owned, must outlive the renderer
   int effect_count = 0;             // at most 8
@@ -186,6 +190,9 @@ using BackBufferFn = std::function<bool(ID3D11RenderTargetView** rtv, uint32_t* 
 // `sdk_flags`, sets the SDK flags (window size, fullscreen, game language). A game module in
 // its own DLL has its own copy of this state: it calls Configure too, without `sdk_flags`.
 void Configure(const GameInfo& info, bool sdk_flags = true);
+// Last thing in the app's OnPreSetup: lets the menu read every pad the SDK knows (PlayStation and
+// other non-XInput pads too), from the thread that polls for the game.
+void InstallPadTap(rex::RuntimeConfig& config);
 const Settings& Get();
 
 // Boot-time values for the renderer.

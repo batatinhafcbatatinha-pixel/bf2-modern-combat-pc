@@ -250,6 +250,9 @@ def main():
         macos_runtime_files(build, sdk, args)
     elif os.name != 'nt':
         linux_runtime_files(build, sdk, args)
+    if os.name == 'nt':
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        __import__('fetch_pad_support').install(build, sdl3=False)
     print('Built privately in', build)
     print('Play with: python tools/play.py --game-files', game_files)
     print('Do not upload .local/, the generated code or the executable.')

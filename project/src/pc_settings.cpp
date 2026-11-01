@@ -30,6 +30,8 @@
 #include <vector>
 
 #include <rex/cvar.h>
+#include <rex/input/input_driver.h>
+#include <rex/input/input_system.h>
 #include <rex/input/mnk/mnk_input_driver.h>
 #include <rex/logging.h>
 #include <rex/runtime.h>
@@ -801,12 +803,117 @@ DWORD PadGetState(DWORD i, PadState* st) {
   return fn ? fn(i, st) : ERROR_DEVICE_NOT_CONNECTED;
 }
 
-// Every connected pad's buttons OR'd, the left stick as a d-pad. A slot without a pad is
-// probed only now and then: XInputGetState on an empty slot is slow.
+// The SDK's input system reads every pad SDL knows (Xbox, PlayStation, Switch, USB adapters), but
+// it is not thread safe: only the thread polling for the game may use it. PadTap is an input
+// driver with no device of its own, so that thread calls it on each poll; it reads all the users
+// there and publishes the buttons here. The tap lives in one module and may be read from another
+// (Street 4 and Copa draw from a DLL), so the block is found through a process variable.
+struct TapBlock {
+  std::atomic<uint32_t> buttons{0};
+  std::atomic<uint32_t> tick{0};
+};
+TapBlock* Tap(bool create) {
+  static TapBlock* block = nullptr;
+  if (block) return block;
+  char text[32] = {};
+  if (GetEnvironmentVariableA("PCS_PAD_TAP", text, sizeof(text)))
+    block = reinterpret_cast<TapBlock*>(uintptr_t(std::strtoull(text, nullptr, 16)));
+  else if (create) {
+    block = new TapBlock;
+    std::snprintf(text, sizeof(text), "%llx", static_cast<unsigned long long>(uintptr_t(block)));
+    SetEnvironmentVariableA("PCS_PAD_TAP", text);
+  }
+  return block;
+}
+
+using rex::X_RESULT;
+
+WORD ReadInputSystem() {
+  auto* runtime = rex::Runtime::instance();
+  auto* input = runtime ? static_cast<rex::input::InputSystem*>(runtime->input_system()) : nullptr;
+  if (!input) return 0;
+  WORD b = 0;
+  for (uint32_t user = 0; user < 4; ++user) {
+    rex::input::X_INPUT_STATE st{};
+    if (input->GetStateForUI(user, &st) != X_ERROR_SUCCESS) continue;
+    b |= WORD(uint16_t(st.gamepad.buttons));
+    if (int16_t(st.gamepad.thumb_ly) > 16000) b |= kPadUp;
+    if (int16_t(st.gamepad.thumb_ly) < -16000) b |= kPadDown;
+    if (int16_t(st.gamepad.thumb_lx) > 16000) b |= kPadRight;
+    if (int16_t(st.gamepad.thumb_lx) < -16000) b |= kPadLeft;
+  }
+  return b;
+}
+
+using rex::X_STATUS;
+
+class PadTap final : public rex::input::InputDriver {
+ public:
+  PadTap() : rex::input::InputDriver(nullptr, 0) {}
+  X_STATUS Setup() override {
+    Tap(true);
+    return X_STATUS_SUCCESS;
+  }
+  void EnumerateDevices(std::vector<rex::input::DeviceInfo>& out) override {
+    rex::input::DeviceInfo info;
+    info.id = kId;
+    info.name = "PC settings pad tap";
+    info.guid = "pcs-tap";
+    info.synthetic = true;
+    out.push_back(info);
+  }
+  X_RESULT GetDeviceState(rex::input::DeviceId, rex::input::X_INPUT_STATE*) override {
+    thread_local bool inside = false;
+    DWORD now = GetTickCount();
+    if (!inside && now - last_ >= 10) {
+      inside = true;
+      last_ = now;
+      TapBlock* tap = Tap(true);
+      tap->buttons.store(ReadInputSystem(), std::memory_order_relaxed);
+      tap->tick.store(now, std::memory_order_release);
+      inside = false;
+    }
+    return X_ERROR_DEVICE_NOT_CONNECTED;
+  }
+  // Answers like a pad: with nothing else plugged in the SDK may ask this device, and the game
+  // must keep seeing a controller.
+  X_RESULT GetDeviceCapabilities(rex::input::DeviceId, uint32_t,
+                                 rex::input::X_INPUT_CAPABILITIES* out) override {
+    std::memset(out, 0, sizeof(*out));
+    out->type = 0x01;
+    out->sub_type = 0x01;
+    out->gamepad.buttons = 0xF3FF;
+    out->gamepad.left_trigger = 0xFF;
+    out->gamepad.right_trigger = 0xFF;
+    return X_ERROR_SUCCESS;
+  }
+  X_RESULT SetDeviceVibration(rex::input::DeviceId, rex::input::X_INPUT_VIBRATION*) override {
+    return X_ERROR_SUCCESS;
+  }
+  X_RESULT GetDeviceKeystroke(rex::input::DeviceId, uint32_t,
+                              rex::input::X_INPUT_KEYSTROKE*) override {
+    return X_ERROR_EMPTY;
+  }
+
+ private:
+  static constexpr rex::input::DeviceId kId = static_cast<rex::input::DeviceId>(0x50435350u);
+  DWORD last_ = 0;
+};
+
+// Every connected pad's buttons OR'd, the left stick as a d-pad. Through the tap while the game
+// polls; with the game held in the menu nobody else uses the input system, so directly. The
+// XInput path remains for a build without the tap. A slot without a pad is probed only now and
+// then: XInputGetState on an empty slot is slow.
 bool g_pad_seen[4];
 unsigned g_pad_probe;
+bool g_game_held = false;
 
 WORD PadsRead(bool probe_all) {
+  if (TapBlock* tap = Tap(false)) {
+    uint32_t tick = tap->tick.load(std::memory_order_acquire);
+    if (tick && GetTickCount() - tick < 100) return WORD(tap->buttons.load(std::memory_order_relaxed));
+    return g_game_held ? ReadInputSystem() : 0;
+  }
   WORD b = 0;
   ++g_pad_probe;
   for (DWORD i = 0; i < 4; ++i) {
@@ -2292,6 +2399,7 @@ void MenuLoop(ID3D11Device* dev, ID3D11DeviceContext* ctx, IDXGISwapChain1* swap
     g_window->SetCursorVisibility(rex::ui::Window::CursorVisibility::kVisible);
   });
   REXLOG_INFO("[pc] settings menu open: game paused");
+  g_game_held = true;
   WORD prev = PadsRead(true), rep_b = 0;  // the buttons that opened it do not count
   DWORD rep_t = 0;
   int ui_language = g_opt.ui_language;
@@ -2332,6 +2440,7 @@ void MenuLoop(ID3D11Device* dev, ID3D11DeviceContext* ctx, IDXGISwapChain1* swap
   }
   // A button still held would reach the game as a fresh press.
   for (int i = 0; i < 100 && PadsRead(false); ++i) Sleep(15);
+  g_game_held = false;
   {
     std::lock_guard<std::mutex> lock(g_mu);
     g_events.clear();
@@ -2455,6 +2564,18 @@ void Configure(const GameInfo& info, bool sdk_flags) {
   rex::cvar::SetFlagByName("fullscreen", g_opt.display ? "true" : "false");
   if (g_opt.language) rex::cvar::SetFlagByName("user_language", std::to_string(g_opt.language));
 
+  // Button maps of PlayStation, adapter and generic pads, next to the executable.
+  {
+    char exe[MAX_PATH * 3] = {};
+    DWORD n = GetModuleFileNameA(nullptr, exe, sizeof(exe));
+    std::string path(exe, n);
+    size_t slash = path.find_last_of("\\/");
+    if (slash != std::string::npos) {
+      path.resize(slash + 1);
+      rex::cvar::SetFlagByName("hid_mappings_file", path + "gamecontrollerdb.txt");
+    }
+  }
+
   // Keyboard as the controller (the SDK's keyboard/mouse driver, merged with any real pad).
   // EA SPORTS FC 27 default "WASD" layout, basic actions only; buttons as in FIFA on Xbox
   // (A pass, B shoot, X lob/cross, Y through pass, RT sprint, LB change player). Semicolon is
@@ -2464,8 +2585,8 @@ void Configure(const GameInfo& info, bool sdk_flags) {
     static const char* const kBinds[][2] = {
         {"keybind_lstick_up", "W,Up"},          {"keybind_lstick_down", "S,Down"},
         {"keybind_lstick_left", "A,Left"},      {"keybind_lstick_right", "D,Right"},
-        {"keybind_a", "L,Return"},              // ground pass / press; menus: confirm
-        {"keybind_b", "Semicolon,Backspace"},   // shoot / tackle; menus: back
+        {"keybind_a", "L,Return,LMB"},          // ground pass / press; menus: confirm
+        {"keybind_b", "Semicolon,Backspace,RMB"},  // shoot / tackle; menus: back
         {"keybind_x", "K"},                     // lob pass / cross / sliding tackle
         {"keybind_y", "O"},                     // through pass / goalkeeper rush
         {"keybind_right_trigger", "P"},         // sprint
@@ -2482,6 +2603,30 @@ void Configure(const GameInfo& info, bool sdk_flags) {
     for (const auto& b : kBinds) rex::cvar::SetFlagByName(b[0], b[1]);
     rex::cvar::SetFlagByName("mnk_mode", "true");
   }
+  if (info.keybinds && IniGet(L"teclado", 1) != 0) {
+    for (int i = 0; i < info.keybind_count; ++i)
+      rex::cvar::SetFlagByName(info.keybinds[i][0], info.keybinds[i][1]);
+    rex::cvar::SetFlagByName("mnk_mode", "true");
+  }
+}
+
+void InstallPadTap(rex::RuntimeConfig& config) {
+  auto inner = config.input_factory;
+  config.input_factory = [inner](bool tool_mode) -> std::unique_ptr<rex::system::IInputSystem> {
+    std::unique_ptr<rex::system::IInputSystem> made =
+        inner ? inner(tool_mode) : nullptr;
+    if (!made) {
+      auto def = rex::input::CreateDefaultInputSystem(tool_mode);
+      made = std::move(def);
+    }
+    auto* input = static_cast<rex::input::InputSystem*>(made.get());
+    if (!tool_mode) {
+      auto tap = std::make_unique<PadTap>();
+      tap->Setup();
+      input->AddDriver(std::move(tap));
+    }
+    return made;
+  };
 }
 
 const Settings& Get() { return g_opt; }

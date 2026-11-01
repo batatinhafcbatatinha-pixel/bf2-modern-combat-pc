@@ -10,11 +10,14 @@
 
 #pragma once
 
+#include <cstdlib>
+#include <rex/input/input_system.h>
 #include <rex/rex_app.h>
 
 #include "native_audio/audio_system.h"
 #include "native_gpu/native_gpu.h"
 #include "pc_game_info.h"
+#include "script_input.h"
 
 class Bf2mcApp : public rex::ReXApp {
  public:
@@ -36,6 +39,18 @@ class Bf2mcApp : public rex::ReXApp {
         -> std::unique_ptr<rex::system::IAudioSystem> {
       return std::make_unique<bf2audio::NativeAudioSystem>(dispatcher);
     };
+    // BF2_INPUT=<file>: scripted pad for tests (see script_input.h) next to the real ones.
+    if (const char* script = std::getenv("BF2_INPUT"); script && *script) {
+      config.input_factory = [path = std::string(script)](bool tool_mode)
+          -> std::unique_ptr<rex::system::IInputSystem> {
+        auto input = rex::input::CreateDefaultInputSystem(tool_mode);
+        auto driver = std::make_unique<ScriptInputDriver>(path);
+        driver->Setup();
+        input->AddDriver(std::move(driver));
+        return input;
+      };
+    }
+    pcs::InstallPadTap(config);
   }
 
   void OnPostSetup() override { bf2n::NativeGpuInstallMmio(); }
