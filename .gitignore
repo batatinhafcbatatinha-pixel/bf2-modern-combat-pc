@@ -40,3 +40,6 @@ game-install-report.json
 !/tools/port-installer
 !/.github/
 !/.github/workflows/
+
+# Local comparison launcher
+/Jogar-BF2MC-original.cmd
