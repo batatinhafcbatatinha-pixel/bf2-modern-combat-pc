@@ -33,3 +33,10 @@ game-install-report.json
 game_files/
 .game-install.lock
 game-install-report.json
+# Shared installer source and manifest
+!/.gitmodules
+!/installer.json
+!/tools/
+!/tools/port-installer
+!/.github/
+!/.github/workflows/
