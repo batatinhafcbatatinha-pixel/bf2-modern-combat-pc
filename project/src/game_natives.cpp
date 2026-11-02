@@ -11,9 +11,14 @@
 // sub_82478728 stores shader constants into the device (r3, first r4, source r5, count r6) and
 // marks them dirty, sub_82341E68 finds an effect parameter by name (linear strcmp over 140-byte
 // entries); ~5% of the render thread together.
+// sub_824F4770 commits an effect's dirty parameters to the device (5.6% of the render thread):
+// two groups of parameters, each with float, int, bool and sampler lists for both shader stages.
+// The float copies are native; int, bool and sampler values still reach the device through the
+// translated setters, with the same guest stack frame. Not run yet: BF2_NO_NATIVE_COMMIT=1 goes
+// back to the translated function, and so does BF2_NATIVE_CHECK=1, which has no check for it.
 //
 // BF2_NO_NATIVE_PARTICLES=1 / BF2_NO_NATIVE_NORMALIZE=1 / BF2_NO_NATIVE_CONSTANTS=1 /
-// BF2_NO_NATIVE_PARAM=1   translated code only
+// BF2_NO_NATIVE_PARAM=1 / BF2_NO_NATIVE_COMMIT=1   translated code only
 // BF2_NATIVE_CHECK=1   particles: the translated function runs and every batch it wrote is
 //                      compared with the native computation; normalize: both run on the same
 //                      input and the outputs are compared ("[native-check] ... MISMATCH")
@@ -41,6 +46,12 @@ REX_EXTERN(__imp__sub_82349150);
 REX_EXTERN(__imp__sub_824AD0A8);
 REX_EXTERN(__imp__sub_82478728);
 REX_EXTERN(__imp__sub_82341E68);
+REX_EXTERN(__imp__sub_824F4770);
+REX_EXTERN(sub_82478A68);  // device: set int constants, vertex stage
+REX_EXTERN(sub_82478AB8);  // device: set int constants, pixel stage
+REX_EXTERN(sub_824789B8);  // device: set bool constants, vertex stage
+REX_EXTERN(sub_82478A10);  // device: set bool constants, pixel stage
+REX_EXTERN(sub_82476EF8);  // device: set texture
 REX_EXTERN(__imp__sub_8233F140);
 REX_EXTERN(__imp__sub_8233F778);
 REX_EXTERN(sub_8233F0D8);  // vertex writer singleton
@@ -60,6 +71,7 @@ const bool g_particles_enabled = !EnvSet("BF2_NO_NATIVE_PARTICLES");
 const bool g_normalize_enabled = !EnvSet("BF2_NO_NATIVE_NORMALIZE");
 const bool g_constants_enabled = !EnvSet("BF2_NO_NATIVE_CONSTANTS");
 const bool g_param_enabled = !EnvSet("BF2_NO_NATIVE_PARAM");
+const bool g_commit_enabled = !EnvSet("BF2_NO_NATIVE_COMMIT");
 const bool g_check = EnvSet("BF2_NATIVE_CHECK");
 const bool g_ab = EnvSet("BF2_NATIVE_AB");
 std::atomic<bool> g_ab_on{true};
@@ -356,6 +368,152 @@ uint32_t FindParameter(uint8_t* base, uint32_t table, uint32_t name) {
   return 0;
 }
 
+// --------------------------------------------------------------------------- effect parameters
+constexpr uint32_t kCommitGate = 0x8282C740;     // with the effect's +696, selects the second table
+constexpr uint32_t kCommitSecondTable = 0x82A0FFAC;
+constexpr uint32_t kCommitFrame = 448;
+
+uint32_t Rotl(uint32_t v, int n) { return (v << n) | (v >> (32 - n)); }
+
+// Calls each(entry) for the 16-byte entries whose bit is set in both the dirty mask and a list,
+// runs of bits from the top, 1024 bytes of entries per 64-bit word.
+template <class F>
+void WalkDirty(uint8_t* base, uint32_t count_at, uint32_t mask, uint32_t table, uint32_t list_at, uint32_t entries_at,
+               F&& each) {
+  for (uint32_t k = 0; k < Load32(base, count_at); ++k) {
+    uint32_t entry = Load32(base, table + entries_at) + (k << 10);
+    uint64_t bits = Load64(base, mask + k * 8) & Load64(base, Load32(base, table + list_at) + k * 8);
+    while (bits) {
+      const int skip = __builtin_clzll(bits);
+      entry += uint32_t(skip) << 4;
+      const uint64_t rest = bits << skip;
+      const int run = ~rest ? __builtin_clzll(~rest) : 64;
+      const uint32_t end = entry + (uint32_t(run) << 4);
+      bits = run >= 64 ? 0 : rest << run;
+      do {
+        each(entry);
+        entry += 16;
+      } while (entry < end);
+    }
+  }
+}
+
+// One group of parameters: value handles at index+4 of entry word 0, values in `values`.
+struct CommitGroup {
+  uint32_t index, values, table, mask, count_at, entries_at, lists_at;
+};
+
+uint32_t ValueAddress(uint8_t* base, const CommitGroup& g, uint32_t entry) {
+  const uint32_t slot = (Rotl(Load32(base, entry), 17) & 0x1FFF8) + g.index;
+  return (Rotl(Load32(base, slot + 4), 4) & 0xFFFF0) + g.values;
+}
+
+// Float parameters: 1-4 vectors copied into the device's constants, memory order on both sides.
+void CommitFloats(uint8_t* base, const CommitGroup& g, uint32_t device, uint32_t list_at, uint32_t word, uint32_t first_reg,
+                  uint32_t dirty_at) {
+  WalkDirty(base, g.count_at, g.mask, g.table, list_at, g.entries_at, [&](uint32_t entry) {
+    const uint32_t w = Load32(base, entry + word);
+    const uint32_t first = w & 0x3FF, count = ((w >> 10) & 3) + 1;
+    const uint32_t src = ValueAddress(base, g, entry), dst = device + ((first + first_reg) << 4);
+    for (uint32_t i = 0; i < count; ++i) {
+      const V v = simde_mm_load_si128(reinterpret_cast<const V*>(Host(base, (src + i * 16) & ~0xFu)));
+      simde_mm_store_si128(reinterpret_cast<V*>(Host(base, (dst + i * 16) & ~0xFu)), v);
+    }
+    Store64(base, device + dirty_at, Load64(base, device + dirty_at) | ConstantDirtyBits(first, count));
+  });
+}
+
+void CommitGroupValues(PPCContext& ctx, uint8_t* base, const CommitGroup& g, uint32_t device) {
+  const uint32_t sp = ctx.r1.u32;
+  using Setter = void (*)(PPCContext&, uint8_t*);
+  // Ints: float value truncated with saturation, last three lanes from the entry's aux vector.
+  auto ints = [&](uint32_t list_at, uint32_t word, uint32_t byte_at, Setter setter) {
+    WalkDirty(base, g.count_at, g.mask, g.table, list_at, g.entries_at, [&](uint32_t entry) {
+      const uint32_t aux = Load32(base, g.table + 80) + (uint32_t(*Host(base, entry + byte_at)) << 4);
+      simde_mm_store_si128(reinterpret_cast<V*>(ctx.v0.u8), LoadA(base, ValueAddress(base, g, entry)));
+      ctx.fpscr.enableFlushMode();
+      simde_mm_store_si128(reinterpret_cast<V*>(ctx.v0.s32), rex::ppc::simde_mm_vctsxs(simde_mm_load_ps(ctx.v0.f32)));
+      simde_mm_store_si128(reinterpret_cast<V*>(ctx.v13.u8), LoadA(base, aux));
+      simde_mm_store_ps(ctx.v0.f32, simde_mm_blend_ps(simde_mm_load_ps(ctx.v0.f32),
+                                                      simde_mm_permute_ps(simde_mm_load_ps(ctx.v13.f32), 228), 7));
+      StoreA(base, sp + 160, simde_mm_load_si128(reinterpret_cast<const V*>(ctx.v0.u8)));
+      const uint32_t w = Load32(base, entry + word);
+      ctx.r3.u64 = device;
+      ctx.r4.u64 = Rotl(w, 20) & 0xFF;
+      ctx.r5.u64 = sp + 160;
+      ctx.r6.u64 = (Rotl(w, 12) & 3) + 1;
+      ctx.lr = 0x824F4B74;
+      setter(ctx, base);
+    });
+  };
+  auto bools = [&](uint32_t list_at, uint32_t word, uint32_t byte_at, Setter setter) {
+    WalkDirty(base, g.count_at, g.mask, g.table, list_at, g.entries_at, [&](uint32_t entry) {
+      simde_mm_store_si128(reinterpret_cast<V*>(ctx.v0.u8), LoadA(base, ValueAddress(base, g, entry)));
+      ctx.fpscr.enableFlushMode();
+      simde_mm_store_si128(reinterpret_cast<V*>(ctx.v0.u32), rex::ppc::simde_mm_vctuxs(simde_mm_load_ps(ctx.v0.f32)));
+      StoreA(base, sp + 256, simde_mm_load_si128(reinterpret_cast<const V*>(ctx.v0.u8)));
+      const uint32_t w = Load32(base, entry + word);
+      ctx.r3.u64 = device;
+      ctx.r4.u64 = *Host(base, entry + byte_at);
+      ctx.r5.u64 = sp + 256;
+      ctx.r6.u64 = (Rotl(w, 2) & 3) + 1;
+      ctx.lr = 0x824F4D44;
+      setter(ctx, base);
+    });
+  };
+  auto samplers = [&](uint32_t list_at, uint32_t word) {
+    WalkDirty(base, g.count_at, g.mask, g.table, list_at, g.entries_at, [&](uint32_t entry) {
+      const uint32_t texture = Load32(base, ValueAddress(base, g, entry));
+      ctx.r3.u64 = device;
+      ctx.r4.u64 = Rotl(Load32(base, entry + word), 10) & 0xFF;
+      ctx.r5.u64 = texture;
+      ctx.lr = 0x824F4ED0;
+      sub_82476EF8(ctx, base);
+    });
+  };
+  ints(g.lists_at + 8, 4, 13, sub_82478A68);
+  ints(g.lists_at + 12, 8, 12, sub_82478AB8);
+  bools(g.lists_at + 16, 4, 15, sub_824789B8);
+  bools(g.lists_at + 20, 8, 14, sub_82478A10);
+  samplers(g.lists_at + 24, 4);
+  samplers(g.lists_at + 28, 8);
+}
+
+void CommitParameters(PPCContext& ctx, uint8_t* base) {
+  const uint32_t effect = ctx.r3.u32;
+  const uint64_t old_lr = ctx.lr;
+  const uint32_t old_sp = ctx.r1.u32;
+  const uint32_t sp = old_sp - kCommitFrame;
+  Store32(base, sp, old_sp);  // stwu r1,-448(r1)
+  ctx.r1.u32 = sp;
+
+  const uint32_t device = Load32(base, effect + 700);
+  const uint32_t first_table = Load32(base, effect + 536);
+  const uint32_t second_mask = Load32(base, effect + 256);
+  const uint32_t second_index = Load32(base, Load32(base, effect + 268));
+  const uint32_t second_values = Load32(base, Load32(base, effect + 300));
+
+  const CommitGroup first{Load32(base, effect + 264), Load32(base, effect + 296), first_table, effect,
+                          effect + 288, 64, 0};
+  CommitFloats(base, first, device, first.lists_at + 0, 4, 120, 16);
+  CommitFloats(base, first, device, first.lists_at + 4, 8, 376, 24);
+  CommitGroupValues(ctx, base, first, device);
+
+  // The second group uses the shared table when the effect and the gate are both set.
+  const uint32_t shared = Load32(base, kCommitSecondTable);
+  const bool use_shared = Load32(base, effect + 696) != 0 && Load32(base, kCommitGate) != 0;
+  const CommitGroup second{second_index, second_values, use_shared ? shared : first_table, second_mask,
+                           effect + 292, 68, 32};
+  CommitFloats(base, second, device, second.lists_at + 0, 4, 120, 16);
+  CommitFloats(base, second, device, second.lists_at + 4, 8, 376, 24);
+  CommitGroupValues(ctx, base, second, device);
+
+  std::memset(Host(base, effect & ~127u), 0, 128);  // dcbzl: the dirty masks
+  std::memset(Host(base, Load32(base, effect + 256) & ~127u), 0, 128);
+  ctx.r1.u32 = old_sp;
+  ctx.lr = old_lr;
+}
+
 void CountCheck(std::atomic<uint64_t>& calls, std::atomic<uint64_t>& mismatches, bool same, const char* what) {
   const uint64_t n = calls.fetch_add(1) + 1;
   if (!same) {
@@ -396,6 +554,14 @@ REX_HOOK_RAW(sub_82341E68) {
   const uint32_t native = FindParameter(base, ctx.r3.u32, ctx.r4.u32);
   __imp__sub_82341E68(ctx, base);
   CountCheck(g_param_calls, g_param_mismatches, ctx.r3.u64 == native, "parameter");
+}
+
+REX_HOOK_RAW(sub_824F4770) {
+  if (!g_commit_enabled || !NativeOn() || g_check) {
+    __imp__sub_824F4770(ctx, base);
+    return;
+  }
+  CommitParameters(ctx, base);
 }
 
 REX_HOOK_RAW(sub_82349150) {
