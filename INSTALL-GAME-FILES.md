@@ -1,6 +1,6 @@
 # Instalar os arquivos do jogo
 
-Abra **Instalar-Arquivos.cmd** e escolha sua ISO ou a pasta completa já extraída.
+Abra **Install-Files.cmd** e escolha sua ISO ou a pasta completa já extraída.
 A interface mostra o arquivo em andamento, a cópia/extração/verificação, o progresso e uma estimativa de término.
 Os arquivos ficam em **game_files/**. A ISO não é mantida como dependência do jogo.
 Depois da verificação, você pode escolher apagar a ISO original; o padrão é preservar.
