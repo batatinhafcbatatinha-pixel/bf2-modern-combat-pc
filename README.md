@@ -8,13 +8,13 @@ An experimental port of the Xbox 360 version of Battlefield 2: Modern Combat, bu
 
 ## Status
 
-- Tested on Windows 11 x64 through the first single-player mission ("In and Out"), including combat. Performance varies substantially with the scene; 60 fps gameplay is not guaranteed. The latest work reduces CPU costs in the renderer without lowering resolution, filtering or effects.
+- Tested on Windows 11 x64 through the first single-player mission ("In and Out"), including combat. Performance varies substantially with the scene. At 4K with 16x anisotropic filtering and no frame limit (Ryzen 5 3600, RTX 3050 Laptop), the light stretch of the first mission runs at about 79 fps without MSAA, 76 with 2x, 71 with 4x and 63 with 8x; the heavy stretch drops to about 50 fps. The GPU is the limit at 4K: at low resolution the game reaches about 110 fps at any MSAA level.
 - Graphics: the game's Direct3D calls are intercepted and drawn by a native Direct3D 11 renderer; Xenos shader microcode is translated to HLSL. No GPU command processor or emulation plugin.
 - Audio: the XMA and XAudio exports are reimplemented on the host (FFmpeg's XMA decoder, own render driver, SDL3 output). The mix carries real signal, but audio has not yet been checked by ear.
 - The Xbox 360 kernel and XAM services come from the ReXGlue runtime as an operating-system compatibility layer.
 - Mouse look turns the camera directly (it does not go through the emulated right stick, so there is no stick curve, acceleration or turn-rate cap); aiming follows the right mouse button reliably.
 - In-game PC options (F1): display mode, internal resolution, vsync, frame limit, FXAA, MSAA (off, 2x, 4x or 8x; applies at once), anisotropic filtering, aspect, volume.
-- Known issues: ground and scenery textures shimmer while the camera moves (under investigation; likely the missing MSAA); translucent streaks from some particle effects (when the player is hit or near explosions); the first mission load can take 1–2 minutes while shaders compile; the game's own aim-sensitivity option does not affect the mouse yet; the stance controls (crouch/prone toggles) are new and not fully tested; multiplayer is not supported.
+- Known issues: ground and scenery textures shimmer while the camera moves (under investigation); translucent streaks from some particle effects (when the player is hit or near explosions); the first mission load can take 1–2 minutes while shaders compile; the stance controls (crouch/prone toggles) are new and not fully tested; multiplayer is not supported; the native effect parameter commit (`sub_824F4770`) is compiled but has not been run yet, and `BF2_NO_NATIVE_COMMIT=1` turns it off.
 - Tested on Windows x64; a Linux build path exists. Experimental [macOS](MACOS.md) build files are included; they have not been compiled or run yet.
 
 ## Why a native port instead of an emulator
