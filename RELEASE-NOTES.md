@@ -1,5 +1,19 @@
 Source kit only: no game, no XEX, no generated code and no executable. Bring your own Xbox 360 USA disc.
 
+**v0.2.2**
+
+- **Untested code in this release:** the native effect parameter commit (`sub_824F4770`) is compiled and on by default, but it has never been run. If a mission breaks or effects look wrong, set `BF2_NO_NATIVE_COMMIT=1`.
+- The shadow map no longer uses MSAA, and whole surfaces use the hardware resolve. At 4K, 16x anisotropic filtering, no frame limit, in the light stretch of the first mission (Ryzen 5 3600, RTX 3050 Laptop), without MSAA / 2x / 4x / 8x: 79/75/68/56 fps before, 79/76/71/63 fps now. Measured before the untested code above went in. The heavy stretch stays at about 50 fps.
+- Float constants travel as changed blocks; native constant store, parameter lookup, particle vertex writer and vec3 normalize.
+- 7e3 render target limits applied to pixel shader output.
+- PC settings menu reads every SDL pad; controller mappings sit next to the executable.
+- The game keeps running when the audio device stops consuming.
+- Experimental macOS build files (not compiled or run yet) and a native Linux build path (not built for this release).
+
+Nobody has played this exact build through.
+
+**Earlier**
+
 Renderer update — 2026-10-23:
 
 - Bound vertex fetch results per 32-bit word to the descriptor's buffer range, returning zero outside it. Mini fetches inherit the full fetch's bounds. This fixes the tested first-mission translucent foliage wall without disabling its shader or lowering graphics settings; the user confirmed the visual result.
