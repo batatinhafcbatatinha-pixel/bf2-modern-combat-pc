@@ -72,6 +72,8 @@
 #include <unordered_map>
 #include <vector>
 
+namespace bf2_natives { bool NativeOn(); }
+
 namespace bf2n {
 namespace {
 
@@ -663,7 +665,12 @@ class Renderer {
   float ScaleFor(uint32_t width) const { return width >= 640 ? scale_ : 1.0f; }
   // MSAA (PC settings, live) on the same scene-sized targets; resolves average the samples.
   uint32_t msaa_ = 1, msaa_wanted_ = 0;
-  uint32_t SamplesFor(uint32_t width) const { return width >= 640 ? msaa_ : 1; }
+  // Square surfaces are the 1600x1600 shadow map: read through sample 0, so samples there only
+  // cost time (a quarter of the extra cost of 8x).
+  uint32_t SamplesFor(uint32_t width, uint32_t height) const {
+    static const bool shadow_msaa = std::getenv("BF2_SHADOW_MSAA") != nullptr;  // A/B
+    return width >= 640 && (width != height || shadow_msaa) ? msaa_ : 1;
+  }
   void UpdateMsaa() {
     uint32_t want = uint32_t(pcs::MsaaSamples());
     if (want == msaa_wanted_) return;
@@ -1003,14 +1010,18 @@ bool Renderer::RecordDraw(DrawPacket& p) {
   add(dev::kFetchConstants, 192 * 4);
   add(dev::kBoolLoopConstants, 40 * 4);
   add(0x2C80, kDeviceShadowBytes - 0x2C80);
-  // Float constants change from draw to draw (matrices): sent as they are, not compared. The
-  // worker shadow gets them; sent_shadow_ is never consulted for these ranges.
-  auto add_always = [&](uint32_t offset, uint32_t bytes) {
+  // Float constants too: a draw usually changes a few matrices out of the block a shader reads,
+  // and copying all of it twice per draw (here and in the worker) was the top cost of both threads.
+  static const bool keep_const_delta = std::getenv("BF2_KEEP_CONST_DELTA") != nullptr;  // A/B of the natives alone
+  const bool const_delta = keep_const_delta || bf2_natives::NativeOn();
+  auto add_constants = [&](uint32_t offset, uint32_t bytes) {
+    if (const_delta) return add(offset, bytes);
     p.ranges.push_back({offset, bytes});
     p.state.insert(p.state.end(), live + offset, live + offset + bytes);
+    std::memcpy(sent_shadow_.data() + offset, live + offset, bytes);
   };
-  if (uint32_t n = p.vs->info.const_count) add_always(dev::kVsConstants, n * 16);
-  if (p.ps && p.ps->info.const_count) add_always(dev::kPsConstants, p.ps->info.const_count * 16);
+  if (uint32_t n = p.vs->info.const_count) add_constants(dev::kVsConstants, n * 16);
+  if (p.ps && p.ps->info.const_count) add_constants(dev::kPsConstants, p.ps->info.const_count * 16);
   for (int i = 0; i < 5; ++i) {
     uint32_t surface = LoadV(device + (i < 4 ? dev::kColorSurfaces + i * 4 : dev::kDepthSurface));
     p.surfaces[i] = surface;
@@ -1422,7 +1433,7 @@ HostRT* Renderer::GetRT(uint32_t base, uint32_t format, uint32_t w, uint32_t h, 
   uint64_t key = uint64_t(base & 0xFFF) | (uint64_t(format & 0xF) << 12) |
                  (uint64_t(depth) << 16) | (uint64_t(w) << 17) | (uint64_t(h) << 31);
   auto it = rts_.find(key);
-  const uint32_t samples = SamplesFor(w);
+  const uint32_t samples = SamplesFor(w, h);
   if (it != rts_.end() && it->second.scale == ScaleFor(w) && it->second.samples == samples) return &it->second;
   HostRT rt;
   rt.width = w;
@@ -1511,7 +1522,7 @@ bool Renderer::CurrentTargets(uint32_t device, Targets& t, bool want_color) {
   t.width = std::clamp(w, 1u, 8192u);
   t.height = std::clamp(h, 1u, 8192u);
   t.scale = ScaleFor(t.width);
-  t.samples = SamplesFor(t.width);
+  t.samples = SamplesFor(t.width, t.height);
   uint32_t edram_mode = Reg(device, 0x2208) & 7;
   static const uint32_t kInfo[4] = {0x2001, 0x2003, 0x2004, 0x2005};
   if (want_color && edram_mode != 5) {
@@ -2939,7 +2950,25 @@ void Renderer::Resolve(uint32_t device, uint32_t flags, uint32_t src_rect, uint3
         LONG w = std::min(sx1 - sx0, LONG(r->width) - dx);
         LONG h = std::min(sy1 - sy0, LONG(r->height) - dy);
         uint32_t s = std::min(slice, r->slices - 1);
-        if (src && w > 0 && h > 0 && r->rtvs[s]) {
+        // A whole multisampled surface with nothing to swap: the hardware average, same result as
+        // ps_copy_ms at about half the cost.
+        static const bool no_hw_resolve = std::getenv("BF2_NO_HW_RESOLVE") != nullptr;  // A/B
+        const bool swap_rb = src && source < 4 && src->guest_format <= 1 && (f.format() == 6 || f.format() == 62);
+        bool hw_resolve = false;
+        if (src && w > 0 && h > 0 && src->samples > 1 && !src->depth && !swap_rb && !no_hw_resolve && !s && !sx0 && !sy0 &&
+            !dx && !dy && uint32_t(w) == t.width && uint32_t(h) == t.height) {
+          D3D11_TEXTURE2D_DESC from, to;
+          src->tex->GetDesc(&from);
+          r->tex->GetDesc(&to);
+          hw_resolve = from.Format == to.Format && from.Width == to.Width && from.Height == to.Height && to.ArraySize == 1;
+          if (hw_resolve) {
+            ctx_->ResolveSubresource(r->tex.Get(), 0, src->tex.Get(), 0, from.Format);
+            r->bgra = false;
+            r->used_width = uint32_t(w);
+            r->used_height = uint32_t(h);
+          }
+        }
+        if (!hw_resolve && src && w > 0 && h > 0 && r->rtvs[s]) {
           ID3D11RenderTargetView* rtv = r->rtvs[s].Get();
           ctx_->OMSetRenderTargets(1, &rtv, nullptr);
           D3D11_BLEND_DESC bd;
@@ -2970,7 +2999,7 @@ void Renderer::Resolve(uint32_t device, uint32_t flags, uint32_t src_rect, uint3
           ctx_->RSSetScissorRects(1, &sc);
           // The resolve stores 8_8_8_8 in memory as BGRA: games sample it with a swizzle that
           // swaps red and blue back (fetch swizzle 60A), so host textures keep the same order.
-          bool swap = source < 4 && src->guest_format <= 1 && (f.format() == 6 || f.format() == 62);
+          const bool swap = swap_rb;
           UtilConsts u{};
           u.u2[0] = float(ScaledCoord(sx0, t.scale) - ScaledCoord(dx, t.scale));
           u.u2[1] = float(ScaledCoord(sy0, t.scale) - ScaledCoord(dy, t.scale));

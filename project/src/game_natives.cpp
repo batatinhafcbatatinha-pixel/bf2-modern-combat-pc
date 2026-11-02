@@ -8,8 +8,12 @@
 // per-particle loop is native.
 // sub_824AD0A8 normalises a vec3 (dst r3, src r4; zero below an epsilon), ~14% of a worker thread.
 // Vector ops use the translated code's operations, order and flush mode.
+// sub_82478728 stores shader constants into the device (r3, first r4, source r5, count r6) and
+// marks them dirty, sub_82341E68 finds an effect parameter by name (linear strcmp over 140-byte
+// entries); ~5% of the render thread together.
 //
-// BF2_NO_NATIVE_PARTICLES=1 / BF2_NO_NATIVE_NORMALIZE=1   translated code only
+// BF2_NO_NATIVE_PARTICLES=1 / BF2_NO_NATIVE_NORMALIZE=1 / BF2_NO_NATIVE_CONSTANTS=1 /
+// BF2_NO_NATIVE_PARAM=1   translated code only
 // BF2_NATIVE_CHECK=1   particles: the translated function runs and every batch it wrote is
 //                      compared with the native computation; normalize: both run on the same
 //                      input and the outputs are compared ("[native-check] ... MISMATCH")
@@ -35,6 +39,8 @@
 
 REX_EXTERN(__imp__sub_82349150);
 REX_EXTERN(__imp__sub_824AD0A8);
+REX_EXTERN(__imp__sub_82478728);
+REX_EXTERN(__imp__sub_82341E68);
 REX_EXTERN(__imp__sub_8233F140);
 REX_EXTERN(__imp__sub_8233F778);
 REX_EXTERN(sub_8233F0D8);  // vertex writer singleton
@@ -52,11 +58,15 @@ bool EnvSet(const char* name) {
 }
 const bool g_particles_enabled = !EnvSet("BF2_NO_NATIVE_PARTICLES");
 const bool g_normalize_enabled = !EnvSet("BF2_NO_NATIVE_NORMALIZE");
+const bool g_constants_enabled = !EnvSet("BF2_NO_NATIVE_CONSTANTS");
+const bool g_param_enabled = !EnvSet("BF2_NO_NATIVE_PARAM");
 const bool g_check = EnvSet("BF2_NATIVE_CHECK");
 const bool g_ab = EnvSet("BF2_NATIVE_AB");
 std::atomic<bool> g_ab_on{true};
 std::atomic<uint64_t> g_particle_batches{0}, g_particle_mismatches{0};
 std::atomic<uint64_t> g_normalize_calls{0}, g_normalize_mismatches{0};
+std::atomic<uint64_t> g_constant_calls{0}, g_constant_mismatches{0};
+std::atomic<uint64_t> g_param_calls{0}, g_param_mismatches{0};
 
 double ThreadCpuMs() {
 #ifdef _WIN32
@@ -107,6 +117,15 @@ uint32_t Load32(uint8_t* base, uint32_t a) {
 void Store32(uint8_t* base, uint32_t a, uint32_t v) {
   v = __builtin_bswap32(v);
   std::memcpy(Host(base, a), &v, 4);
+}
+uint64_t Load64(uint8_t* base, uint32_t a) {
+  uint64_t v;
+  std::memcpy(&v, Host(base, a), 8);
+  return __builtin_bswap64(v);
+}
+void Store64(uint8_t* base, uint32_t a, uint64_t v) {
+  v = __builtin_bswap64(v);
+  std::memcpy(Host(base, a), &v, 8);
 }
 V Rev(V v) { return simde_mm_shuffle_epi8(v, simde_mm_loadu_si128(reinterpret_cast<const V*>(rex::ppc::VectorMaskL))); }
 V LoadA(uint8_t* base, uint32_t a) { return Rev(simde_mm_load_si128(reinterpret_cast<const V*>(Host(base, a & ~0xFu)))); }
@@ -301,6 +320,83 @@ void Normalize(PPCContext& ctx, uint8_t* base) {
   ctx.r3.u64 = Load32(base, sp + 20);
 }
 }  // namespace
+
+namespace {
+// ---------------------------------------------------------------------------------- constants
+// Bits of the device's dirty mask (+16) for constants [first, first + count), one per 4 constants,
+// counted from the top. The shifts are srad/srd: 7-bit amounts, 64 and up fill with the sign/zero.
+uint64_t ConstantDirtyBits(uint32_t first, uint32_t count) {
+  const uint32_t lo = first >> 2, hi = (first + count - 1) >> 2;
+  const uint32_t span = (hi - lo) & 0x7F, shift = lo & 0x7F;
+  const uint64_t run = span >= 64 ? ~uint64_t(0) : uint64_t(int64_t(INT64_MIN) >> span);
+  return shift >= 64 ? 0 : run >> shift;
+}
+
+void SetConstants(uint8_t* base, uint32_t device, uint32_t first, uint32_t source, uint32_t count) {
+  // Memory order on both sides, so no byte swap: lvlx + lvrx is an unaligned 16-byte load.
+  const uint8_t* src = Host(base, source);
+  uint8_t* dst = Host(base, (device + ((first + 120) << 4)) & ~0xFu);
+  for (uint32_t i = 0; i < count; ++i) {
+    simde_mm_store_si128(reinterpret_cast<V*>(dst + i * 16),
+                         simde_mm_loadu_si128(reinterpret_cast<const V*>(src + i * 16)));
+  }
+  Store64(base, device + 16, Load64(base, device + 16) | ConstantDirtyBits(first, count));
+}
+
+// -------------------------------------------------------------------------------- parameter name
+uint32_t FindParameter(uint8_t* base, uint32_t table, uint32_t name) {
+  const uint32_t count = Load32(base, table + 16);
+  if (!count) return 0;
+  const uint32_t entries = Load32(base, table + 36);
+  const char* wanted = reinterpret_cast<const char*>(Host(base, name));
+  for (uint32_t i = 0; i < count; ++i) {
+    const char* own = reinterpret_cast<const char*>(Host(base, Load32(base, entries + 4 + i * 140)));
+    if (*own == *wanted && std::strcmp(own, wanted) == 0) return entries + i * 140;
+  }
+  return 0;
+}
+
+void CountCheck(std::atomic<uint64_t>& calls, std::atomic<uint64_t>& mismatches, bool same, const char* what) {
+  const uint64_t n = calls.fetch_add(1) + 1;
+  if (!same) {
+    uint64_t m = mismatches.fetch_add(1) + 1;
+    if (m <= 20) REXLOG_WARN("[native-check] {} MISMATCH", what);
+  }
+  if ((n & 0xFFFFF) == 0) REXLOG_INFO("[native-check] {} calls={} mismatches={}", what, n, mismatches.load());
+}
+}  // namespace
+
+REX_HOOK_RAW(sub_82478728) {
+  if (!g_constants_enabled || !NativeOn()) {
+    __imp__sub_82478728(ctx, base);
+    return;
+  }
+  const uint32_t device = ctx.r3.u32, first = ctx.r4.u32, source = ctx.r5.u32, count = ctx.r6.u32;
+  if (!g_check) {
+    SetConstants(base, device, first, source, count);
+    return;
+  }
+  const uint64_t mask = Load64(base, device + 16) | ConstantDirtyBits(first, count);
+  __imp__sub_82478728(ctx, base);
+  const uint8_t* src = Host(base, source);
+  const uint8_t* dst = Host(base, (device + ((first + 120) << 4)) & ~0xFu);
+  const bool same = Load64(base, device + 16) == mask && std::memcmp(src, dst, size_t(count) * 16) == 0;
+  CountCheck(g_constant_calls, g_constant_mismatches, same, "constants");
+}
+
+REX_HOOK_RAW(sub_82341E68) {
+  if (!g_param_enabled || !NativeOn()) {
+    __imp__sub_82341E68(ctx, base);
+    return;
+  }
+  if (!g_check) {
+    ctx.r3.u64 = FindParameter(base, ctx.r3.u32, ctx.r4.u32);
+    return;
+  }
+  const uint32_t native = FindParameter(base, ctx.r3.u32, ctx.r4.u32);
+  __imp__sub_82341E68(ctx, base);
+  CountCheck(g_param_calls, g_param_mismatches, ctx.r3.u64 == native, "parameter");
+}
 
 REX_HOOK_RAW(sub_82349150) {
   if (g_particles_enabled && NativeOn()) {
