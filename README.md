@@ -45,7 +45,7 @@ Do not upload the ISO, extracted files, generated code or the built executable.
 
 ## Controllers
 
-Xbox pads and every pad SDL knows work in the game and in the PC settings menu: DualShock 3/4, DualSense, Switch pads, USB adapters for PS2 and original Xbox pads. `tools/build_local.py` downloads `gamecontrollerdb.txt` (SDL_GameControllerDB, zlib license) next to the executable, so generic adapters get their button names. Only Xbox-type input was tested; no PlayStation pad or adapter has been tried on real hardware yet.
+Xbox pads and every pad SDL knows work in the game and in the PC settings menu: DualShock 3/4, DualSense, Switch pads, USB adapters for PS2 and original Xbox pads. `tools/build_local.py` downloads `gamecontrollerdb.txt` (SDL_GameControllerDB, zlib license) next to the executable, so generic adapters get their button names. Only Xbox-type input was tested; no PlayStation pad or adapter has been tried on real hardware yet. The pad vibrates when the game asks for it; **Controller vibration** in the PC settings turns that off.
 
 ## Build on Windows
 

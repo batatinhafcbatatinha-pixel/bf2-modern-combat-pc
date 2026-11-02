@@ -57,6 +57,7 @@ struct Settings {
   int ui_language = -1;
   int language = 0;     // game language (XC_LANGUAGE id; 0 = the console default) (restart)
   int volume = 100;
+  int vibration = 1;  // controller rumble
   int show_fps = 0;
 };
 

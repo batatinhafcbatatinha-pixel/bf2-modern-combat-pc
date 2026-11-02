@@ -164,6 +164,8 @@ const Translation k_tr[] = {
     {L"Graphics API", {L"API gráfica", L"API graphique", L"Grafik-API", L"API grafica", L"Grafische API", L"Графический API"}},
     {L"Graphics card", {L"Tarjeta gráfica", L"Carte graphique", L"Grafikkarte", L"Scheda video", L"Videokaart", L"Видеокарта"}},
     {L"Automatic (Windows default)", {L"Automática (predeterminada de Windows)", L"Automatique (par défaut de Windows)", L"Automatisch (Windows-Standard)", L"Automatica (predefinita di Windows)", L"Automatisch (standaard van Windows)", L"Автоматически (по умолчанию Windows)"}},
+    {L"Controller vibration", {L"Vibración del mando", L"Vibration de la manette", L"Controller-Vibration", L"Vibrazione del controller", L"Controllertrilling", L"Вибрация контроллера"}},
+    {L"Turns the controller's vibration on or off.", {L"Activa o desactiva la vibración del mando.", L"Active ou désactive la vibration de la manette.", L"Schaltet die Vibration des Controllers ein oder aus.", L"Attiva o disattiva la vibrazione del controller.", L"Zet de trilling van de controller aan of uit.", L"Включает или выключает вибрацию контроллера."}},
     {L"Show FPS", {L"Mostrar FPS", L"Afficher les FPS", L"FPS anzeigen", L"Mostra FPS", L"FPS tonen", L"Показывать FPS"}},
     {L"Yes", {L"Sí", L"Oui", L"Ja", L"Sì", L"Ja", L"Да"}},
     {L"No", {L"No", L"Non", L"Nein", L"No", L"Nee", L"Нет"}},
@@ -283,6 +285,7 @@ void SaveIni() {
   IniPut(L"volume", g_opt.volume);
   IniPut(L"idioma_menu", g_opt.ui_language);
   IniPut(L"mostrar_fps", g_opt.show_fps);
+  IniPut(L"vibracao", g_opt.vibration);
   for (int i = 0; i < g_info.effect_count; ++i)
     IniPut(EffectKey(i).c_str(), EffectEnabled(i) ? 1 : 0);
 }
@@ -544,10 +547,12 @@ void WindowSize(int scale, uint32_t& w, uint32_t& h) {
 
 // ----------------------------------------------------------------------- menu state
 
+void PublishVibration();
+
 enum Item {
   IT_DISPLAY, IT_MONITOR, IT_REFRESH, IT_VSYNC, IT_FPS, IT_SCALE, IT_UPSCALE, IT_ASPECT, IT_AA, IT_MSAA, IT_ANISO,
   IT_EFFECT0, IT_EFFECT_END = IT_EFFECT0 + kMaxEffects,
-  IT_API = IT_EFFECT_END, IT_GPU, IT_SHOW_FPS, IT_UI_LANG, IT_LANG, IT_VOLUME, IT_RESUME, IT_RESTART, IT_QUIT,
+  IT_API = IT_EFFECT_END, IT_GPU, IT_SHOW_FPS, IT_VIBRATION, IT_UI_LANG, IT_LANG, IT_VOLUME, IT_RESUME, IT_RESTART, IT_QUIT,
   IT_COUNT
 };
 
@@ -670,6 +675,10 @@ void Change(int it, int d) {
       break;
     }
     case IT_SHOW_FPS: g_opt.show_fps = !g_opt.show_fps; break;
+    case IT_VIBRATION:
+      g_opt.vibration = !g_opt.vibration;
+      PublishVibration();
+      break;
     case IT_UI_LANG: g_opt.ui_language = (g_opt.ui_language + 1 + kUiLangCount + 1 + d) % (kUiLangCount + 1) - 1; break;
     case IT_LANG:
       list.push_back(0);
@@ -811,6 +820,7 @@ DWORD PadGetState(DWORD i, PadState* st) {
 struct TapBlock {
   std::atomic<uint32_t> buttons{0};
   std::atomic<uint32_t> tick{0};
+  std::atomic<uint32_t> vibration{1};  // wanted state; the polling thread applies it
 };
 TapBlock* Tap(bool create) {
   static TapBlock* block = nullptr;
@@ -825,6 +835,8 @@ TapBlock* Tap(bool create) {
   }
   return block;
 }
+
+void PublishVibration() { Tap(true)->vibration.store(g_opt.vibration ? 1 : 0, std::memory_order_relaxed); }
 
 using rex::X_RESULT;
 
@@ -843,6 +855,13 @@ WORD ReadInputSystem() {
     if (int16_t(st.gamepad.thumb_lx) < -16000) b |= kPadLeft;
   }
   return b;
+}
+
+// Also silences a motor that is running when the option goes off: the game may not call again.
+void ApplyVibration(bool enabled) {
+  auto* runtime = rex::Runtime::instance();
+  auto* input = runtime ? static_cast<rex::input::InputSystem*>(runtime->input_system()) : nullptr;
+  if (input && input->GetVibrationEnabled() != enabled) input->ToggleVibration();
 }
 
 using rex::X_STATUS;
@@ -869,6 +888,7 @@ class PadTap final : public rex::input::InputDriver {
       inside = true;
       last_ = now;
       TapBlock* tap = Tap(true);
+      ApplyVibration(tap->vibration.load(std::memory_order_relaxed) != 0);
       tap->buttons.store(ReadInputSystem(), std::memory_order_relaxed);
       tap->tick.store(now, std::memory_order_release);
       inside = false;
@@ -1495,6 +1515,10 @@ void ItemText(int it, wchar_t* label, wchar_t* value, bool* greyed) {
       for (size_t i = 0; i < g_gpu_index.size(); ++i)
         if (g_gpu_index[i] == g_opt.adapter) wcsncpy(value, g_gpu_name[i].c_str(), 127);
       break;
+    case IT_VIBRATION:
+      wcscpy(label, T(L"Vibração do controle", L"Controller vibration"));
+      wcscpy(value, g_opt.vibration ? T(L"Ligada", L"On") : T(L"Desligada", L"Off"));
+      break;
     case IT_SHOW_FPS:
       wcscpy(label, T(L"Mostrar FPS", L"Show FPS"));
       wcscpy(value, g_opt.show_fps ? T(L"Sim", L"Yes") : T(L"Não", L"No"));
@@ -1546,6 +1570,7 @@ const wchar_t* ItemHelp(int it) {
       return T(L"DirectX 11 ou Vulkan (pelo DXVK). Se algo aparecer errado ou travar, experimente a outra. Reinicia o jogo.", L"DirectX 11 or Vulkan (through DXVK). If something looks wrong or stutters, try the other one. Restarts the game.");
     }
     case IT_GPU: return T(L"Placa de vídeo usada para desenhar o jogo.", L"Graphics card used to render the game.");
+    case IT_VIBRATION: return T(L"Liga ou desliga a vibração do controle.", L"Turns the controller's vibration on or off.");
     case IT_SHOW_FPS: return T(L"Mostra os quadros por segundo no canto da tela.", L"Shows frames per second in the corner of the screen.");
     case IT_UI_LANG: return T(L"Idioma deste menu. Automático segue o idioma do jogo. A mudança é imediata.", L"Language of this settings menu. Automatic follows the game's language. Changes apply immediately.");
     case IT_LANG: return T(L"Idioma dos textos e narração do jogo (o que o disco tiver).", L"Language of the game's text and commentary (as available on the disc).");
@@ -2495,6 +2520,8 @@ void Configure(const GameInfo& info, bool sdk_flags) {
   g_opt.ui_language = Clampi(IniGet(L"idioma_menu", -1), -1, kUiLangCount - 1);
   g_opt.upscale = Clampi(IniGet(L"ampliacao", 0), 0, 1);
   g_opt.show_fps = Clampi(IniGet(L"mostrar_fps", 0), 0, 1);
+  g_opt.vibration = Clampi(IniGet(L"vibracao", 1), 0, 1);
+  PublishVibration();
   g_hint_enabled = IniGet(L"botao_menu", 1) != 0;
   // Test runs: environment wins over the ini.
   if (info.internal_resolution) g_opt.scale = Clampi(EnvInt("PCS_RESOLUTION", g_opt.scale), 0, kNumRes - 1);
@@ -2562,6 +2589,7 @@ void Configure(const GameInfo& info, bool sdk_flags) {
   rex::cvar::SetFlagByName("window_width", std::to_string(ww * 96 / dpi));
   rex::cvar::SetFlagByName("window_height", std::to_string(wh * 96 / dpi));
   rex::cvar::SetFlagByName("fullscreen", g_opt.display ? "true" : "false");
+  rex::cvar::SetFlagByName("vibration", g_opt.vibration ? "true" : "false");
   if (g_opt.language) rex::cvar::SetFlagByName("user_language", std::to_string(g_opt.language));
 
   // Button maps of PlayStation, adapter and generic pads, next to the executable.
