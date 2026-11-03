@@ -2,8 +2,9 @@
 # Started by Setup.cmd. Safe to run again: finished steps are skipped. Log: setup-log.txt.
 # The steps of this game are in setup.json; the same script is shared by every port.
 # -Yes answers every question with yes; -Rebuild redoes every step; -ToolsOnly stops after the tools;
-# -NoShortcut skips the desktop shortcut; -Jobs sets the number of parallel compile jobs.
-param([switch]$Yes, [switch]$Rebuild, [switch]$ToolsOnly, [switch]$NoShortcut, [int]$Jobs = 0)
+# -NoShortcut skips the desktop shortcut; -Jobs sets the number of parallel compile jobs;
+# -PrepareOnly (Prepare-Build.cmd) runs only the steps that prepare the build files from your disc, not the compile.
+param([switch]$Yes, [switch]$Rebuild, [switch]$ToolsOnly, [switch]$NoShortcut, [switch]$PrepareOnly, [int]$Jobs = 0)
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 $Root = Split-Path -Parent $PSScriptRoot
@@ -52,6 +53,10 @@ Start-Transcript -Path (Join-Path $Root 'setup-log.txt') -Force | Out-Null
 Say "Setup for $Game (PC port). Your game is never uploaded anywhere." "Setup de $Game (port para PC). Seu jogo nunca e enviado para lugar nenhum." 'Green'
 if ($Setup.available -eq $false) {
   Fail "This port cannot be built from this download yet: $($Setup.reason_en)" "Este port ainda nao pode ser montado a partir deste download: $($Setup.reason_pt)"
+}
+if ($PrepareOnly -and -not @($Setup.steps | Where-Object { $_.prepare }).Count) {
+  Say 'Nothing to prepare separately for this game: Setup.cmd prepares and compiles in one step.' 'Nada para preparar separadamente neste jogo: o Setup.cmd prepara e compila numa etapa so.' 'Yellow'
+  Stop-Transcript | Out-Null; exit 0
 }
 if (-not [Environment]::Is64BitOperatingSystem) { Fail 'A 64-bit Windows is required.' 'E preciso Windows de 64 bits.' }
 $drive = Get-PSDrive -Name $Root.Substring(0, 1)
@@ -165,6 +170,7 @@ function Expand([string]$text) {
     Replace('{jobs}', "$Jobs").Replace('{llvm}', "$($Tool['LLVM'])")
 }
 foreach ($s in $Setup.steps) {
+  if ($PrepareOnly -and -not $s.prepare) { continue }
   if (-not $Rebuild -and $s.done_if -and (Test-Path (Join-Path $Root $s.done_if))) { Say "- $($s.name): already done" "- $($s.name): ja feito" 'DarkGray'; continue }
   if ($s.env) { foreach ($e in $s.env.PSObject.Properties) { Set-Item -Path "env:$($e.Name)" -Value (Expand $e.Value) } }
   while ($true) {
@@ -181,6 +187,12 @@ foreach ($s in $Setup.steps) {
   }
 }
 
+if ($PrepareOnly) {
+  Write-Host ''
+  Say 'Done: the build files are prepared from your disc. Setup.cmd compiles them (finished steps are skipped).' `
+      'Pronto: os arquivos do build foram preparados a partir do seu disco. O Setup.cmd compila (as etapas prontas sao puladas).' 'Green'
+  Stop-Transcript | Out-Null; exit 0
+}
 $play = Join-Path $Root $Setup.play
 if (-not $NoShortcut -and (Test-Path $play) -and (Ask 'Create a desktop shortcut to play?' 'Criar um atalho na area de trabalho para jogar?')) {
   $shell = New-Object -ComObject WScript.Shell
