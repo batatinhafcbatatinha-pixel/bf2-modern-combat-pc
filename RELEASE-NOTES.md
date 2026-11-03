@@ -1,5 +1,13 @@
 Source kit only: no game, no XEX, no generated code and no executable. Bring your own Xbox 360 USA disc.
 
+**v0.2.3**
+
+- **Controller vibration** on/off in the F1 PC settings.
+- The game-data installer launcher is now `Install-Files.cmd` (English name).
+- The shared game-data installer (`tools/port-installer`) ships in the repository.
+
+Vibration has been compiled but not felt on a real controller yet. Nobody has played this exact build through.
+
 **v0.2.2**
 
 - **Untested code in this release:** the native effect parameter commit (`sub_824F4770`) is compiled and on by default, but it has never been run. If a mission breaks or effects look wrong, set `BF2_NO_NATIVE_COMMIT=1`.
