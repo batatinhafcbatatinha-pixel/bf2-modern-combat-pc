@@ -27,7 +27,8 @@ MAX_BYTES = 512 * 1024
 
 
 def submodules():
-    """Submodule paths (e.g. tools/port-installer): separate repositories with their own audit."""
+    """Submodule paths (tools/port-installer). Their files go into the kit too, under the same checks, so a
+    ZIP download can install the game files without Git; the submodule must be checked out."""
     if not (ROOT / '.gitmodules').is_file():
         return set()
     out = subprocess.run(['git', 'config', '--file', '.gitmodules', '--get-regexp', r'\.path$'], cwd=ROOT,
@@ -36,12 +37,13 @@ def submodules():
 
 
 def audited_files():
-    names = subprocess.check_output(['git', 'ls-files', '-z'], cwd=ROOT).decode('utf-8').split('\0')
-    skip = submodules()
+    names = subprocess.check_output(['git', 'ls-files', '-z', '--recurse-submodules'],
+                                    cwd=ROOT).decode('utf-8').split('\0')
+    for module in submodules():
+        if not any(name.startswith(module + '/') for name in names):
+            raise ValueError(f'Submodule {module} is not checked out (git submodule update --init)')
     files = []
     for name in filter(None, names):
-        if name in skip:
-            continue
         path = PurePosixPath(name)
         if path.is_absolute() or '..' in path.parts or any(part in FORBIDDEN_PARTS for part in path.parts):
             raise ValueError('Forbidden publication path: ' + name)

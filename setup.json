@@ -1,0 +1,38 @@
+{
+  "game": "Battlefield 2: Modern Combat",
+  "disc": "Xbox 360, USA",
+  "play": "Play-BF2MC.cmd",
+  "disk_gb": 16,
+  "download_gb": 1,
+  "minutes": "20-60",
+  "tools": [
+    "llvm",
+    "cmake",
+    "ninja"
+  ],
+  "gb_per_job": 2,
+  "steps": [
+    {
+      "name": "Translate the game code and compile",
+      "run": [
+        "{python}",
+        "tools/build_local.py",
+        "--game-files",
+        "{game_files}",
+        "--llvm-dir",
+        "{llvm}",
+        "--jobs",
+        "{jobs}"
+      ],
+      "reuse_if": ".local/generation-complete.json",
+      "reuse_arg": "--reuse-generated",
+      "retry_if": ".local/build/build.ninja"
+    }
+  ],
+  "submodules": {
+    "tools/port-installer": {
+      "url": "https://github.com/batatinhafcbatatinha-pixel/port-installer.git",
+      "commit": "225df3dc28e697a19d5edb3ac58e0d532496619b"
+    }
+  }
+}

@@ -6,6 +6,67 @@
 
 An experimental port of the Xbox 360 version of Battlefield 2: Modern Combat, built through static recompilation with the [ReXGlue SDK](https://github.com/rexglue/rexglue-sdk), with its own Direct3D 11 renderer, its own XMA audio pipeline and a modern control layout. **This public repository is a source and local-build kit, not a ready-to-play game download.** The game's PowerPC code is translated locally from your own verified disc; no game executable or generated game code is distributed here.
 
+## How to play
+
+> [!IMPORTANT]
+> **There is no ready-to-play download.** This page has only tools: they turn *your own* game disc into a PC game,
+> on your computer. The first time takes a while (20-60 minutes on a recent PC), mostly waiting.
+> After that, you just double-click to play.
+
+**You need**
+
+- **Windows 10 or 11** (64-bit) with about **23 GB** free. (Linux and Mac: see below.)
+- Your own **Battlefield 2: Modern Combat** (Xbox 360, USA), as a disc image (`.iso`) made from your disc, or its extracted
+  files. Other versions are not accepted; the setup checks this for you.
+
+**Steps**
+
+1. **Download**, one of these two ways:
+   <details open><summary><b>Easiest: the ZIP</b></summary>
+
+   Open [Releases](https://github.com/batatinhafcbatatinha-pixel/bf2-modern-combat-pc/releases/latest), download **`bf2-modern-combat-pc-source-kit.zip`** and extract it to a short folder, such as
+   `C:\Games\bf2-modern-combat-pc`.
+   </details>
+   <details><summary><b>With Git: always the newest version</b></summary>
+
+   ```powershell
+   git clone --recursive https://github.com/batatinhafcbatatinha-pixel/bf2-modern-combat-pc.git C:\Games\bf2-modern-combat-pc
+   ```
+   To update later: `git pull --recurse-submodules`, then run `Setup.cmd` again.
+   </details>
+
+2. **Double-click `Setup.cmd`.** It asks before installing anything, then:
+   - installs Python and Microsoft's C++ Build Tools if you don't have them (free; Windows asks for permission once);
+   - downloads the other build tools (about 1 GB) **into this folder only**;
+   - opens a window where you **pick your `.iso`**: it checks the version and copies the game files;
+   - builds your PC version, and offers a desktop shortcut.
+
+   If anything stops, run `Setup.cmd` again: finished steps are skipped.
+
+3. **Play:** double-click **`Play-BF2MC.cmd`** (or the desktop shortcut).
+
+**In the game:** **F1** opens the PC settings. Controllers and the keyboard work: see [Controls](#controls).
+
+**Problems?** Open an [issue](https://github.com/batatinhafcbatatinha-pixel/bf2-modern-combat-pc/issues) with `setup-log.txt` and a screenshot. Never attach game files.
+
+`Setup.cmd` is new: so far it has been tried from a fresh download only with the FIFA Street 3 port. If it stops for you, please open an issue with `setup-log.txt`.
+
+<details><summary><b>Linux and Mac</b></summary>
+
+- **Linux:** works natively (no Wine), but the setup is by hand for now: see [Linux](#linux).
+- **Mac:** not playable yet. The Mac build files are an experiment that has never been compiled or run on a Mac. Details in [MACOS.md](MACOS.md); if you have a Mac and want to help test, open an issue.
+
+</details>
+
+<details><summary><b>Questions</b></summary>
+
+- **Is this legal?** This page contains no game, only tools. You use the game you already own.
+- **Can I share my built game?** No: it contains the game's code. Keep it on your PC.
+- **Will it run on my PC?** Any graphics card with DirectX 11 should work. Measured: about 50-79 fps in the first mission at 4K on a Ryzen 5 3600 + RTX 3050 Laptop.
+- **How do I remove it?** Delete the folder. Python and the Build Tools can be removed in Windows Settings > Apps.
+
+</details>
+
 ## Status
 
 - Tested on Windows 11 x64 through the first single-player mission ("In and Out"), including combat. Performance varies substantially with the scene. At 4K with 16x anisotropic filtering and no frame limit (Ryzen 5 3600, RTX 3050 Laptop), the light stretch of the first mission runs at about 79 fps without MSAA, 76 with 2x, 71 with 4x and 63 with 8x; the heavy stretch drops to about 50 fps. The GPU is the limit at 4K: at low resolution the game reaches about 110 fps at any MSAA level.
@@ -17,69 +78,11 @@ An experimental port of the Xbox 360 version of Battlefield 2: Modern Combat, bu
 - Known issues: ground and scenery textures shimmer while the camera moves (under investigation); translucent streaks from some particle effects (when the player is hit or near explosions); the first mission load can take 1–2 minutes while shaders compile; the stance controls (crouch/prone toggles) are new and not fully tested; multiplayer is not supported; the native effect parameter commit (`sub_824F4770`) is compiled but has not been run yet, and `BF2_NO_NATIVE_COMMIT=1` turns it off.
 - Tested on Windows x64; a Linux build path exists. Experimental [macOS](MACOS.md) build files are included; they have not been compiled or run yet.
 
-## Why a native port instead of an emulator
+## Controls
 
-An emulator such as [Xenia](https://xenia.jp) recreates the Xbox 360: it JIT-translates the PowerPC code at run time, emulates the Xenos GPU by processing the console's command buffers and models the audio hardware. That is the right approach for the whole library. This port takes a different route for one game:
-
-- **Ahead-of-time code.** The game's PowerPC code becomes C++ compiled by a modern optimizing compiler before you play.
-- **No GPU emulation in the hot path.** Draw calls go from the game's D3D library straight to Direct3D 11, instead of being turned into command packets and register writes that are emulated again.
-- **Native audio** decoding and mixing on the PC.
-- **PC-side controls in the port itself:** a modern shooter layout (aim on LT) and keyboard/mouse bindings, written as plain C++ hooks you can read and change.
-
-The trade-off: it covers only this game and revision, and it is experimental. An emulator is the more general and better-tested option.
-
-## Your game files
-
-Only the **Xbox 360 USA** revision is accepted. Extract your own disc image into a new folder and validate it:
-
-```sh
-python tools/extract_iso.py "Battlefield 2 - Modern Combat (USA).iso" --output game_files
-python tools/validate_game.py game_files
-```
-
-```text
-default.xex  a2e791b578ef15420f3737b48999ca4285fdf85c85cb6732aac0e465ed9d5484
-```
-
-Do not upload the ISO, extracted files, generated code or the built executable.
-
-## Controllers
+### Controller
 
 Xbox pads and every pad SDL knows work in the game and in the PC settings menu: DualShock 3/4, DualSense, Switch pads, USB adapters for PS2 and original Xbox pads. `tools/build_local.py` downloads `gamecontrollerdb.txt` (SDL_GameControllerDB, zlib license) next to the executable, so generic adapters get their button names. Only Xbox-type input was tested; no PlayStation pad or adapter has been tried on real hardware yet. The pad vibrates when the game asks for it; **Controller vibration** in the PC settings turns that off.
-
-## Build on Windows
-
-Requirements: Python 3.10+, Visual Studio 2022 Build Tools (C++ workload, Windows SDK), LLVM/Clang 20 or newer (a complete install that includes the clang resource headers), CMake 3.25+ and Ninja.
-
-```powershell
-python tools/build_local.py --game-files game_files --llvm-dir "C:\Program Files\LLVM"
-python tools/play.py --game-files game_files
-```
-
-`build_local.py` validates your files, downloads the pinned ReXGlue SDK nightly (`0.10.0.24-dev.gbd833a2`, SHA-256 checked) and applies the FPSCR patch in `patches/`, downloads the FFmpeg headers matching the SDK's `libavcodec`, translates your `default.xex` into private C++ under `.local/`, compiles the port, and removes any GPU emulation plugin from the output. `--reuse-generated` skips the translation on later builds.
-
-## Build on Linux
-
-The same kit builds a native Linux x86-64 executable, without Wine: the ReXGlue SDK's Linux package, the port's
-own renderer on Direct3D 11 through DXVK native (a Linux library implementing D3D11 on Vulkan), HLSL shaders
-compiled by vkd3d-shader, window and input through the SDK's SDL3. Requirements: Python 3.10+, Clang 20
-(`clang-20`/`clang++-20` are picked up), CMake 3.25+, Ninja, pkg-config, fontconfig and FreeType development
-files, a Vulkan driver, [DXVK native 3.1.1](https://github.com/doitsujin/dxvk/releases) and vkd3d-shader 1.19 or
-newer.
-
-```sh
-python3 tools/build_local.py --game-files game_files \
-  --dxvk-native-dir /path/to/dxvk-native/usr --vkd3d-dir /path/to/vkd3d-install
-python3 tools/play.py --game-files game_files
-```
-
-The build copies the SDK runtime, DXVK native and vkd3d-shader next to the executable (it finds them there).
-
-## Build on macOS
-
-Experimental and not compiled or run yet: see [MACOS.md](MACOS.md).
-
-## Controls
 
 Modern layout after Battlefield 6's defaults (during gameplay only; menus keep the original A = select, B = back). Pass `--bf2_modern_controls=false` after `play.py` for the original console layout.
 
@@ -107,11 +110,62 @@ Modern layout after Battlefield 6's defaults (during gameplay only; menus keep t
 
 Mouse options: `--bf2_mouse_sensitivity=1.0`, `--bf2_mouse_invert=true`, `--bf2_mouse_look=false --mnk_mouse=true` (the SDK's mouse-as-right-stick instead). F12 writes the next frame (draw trace, render targets and every sampled texture with its mip levels) to `captures/<time>/` next to the executable, for bug reports.
 
-## Settings
+### PC settings
 
 **F1** (or Back + Start on a controller), or the **PC SETTINGS** line added to the game's own OPTIONS submenu (main menu, pause menus and campaign screen), opens the PC settings over the game. On the game's menus a small "PC settings" button is also shown (`botao_menu=0` in `bf2mc-pc.ini` hides it), and the main menu's "XBOX LIVE GAME" line reads "ONLINE GAME" (`menu_no_jogo=0` keeps the original text and the OPTIONS line out). The settings screen uses the game's menu look, decoded at run time from your own disc archive (no assets are shipped; `PCS_THEME=0` uses the plain theme). Options: display mode, monitor, refresh rate, VSync, frame limit, internal resolution, FXAA, MSAA (off, 2x, 4x or 8x; applies at once), anisotropic filtering, graphics API, graphics card, FPS counter and volume. Settings are saved in `bf2mc-pc.ini` next to the executable. **Graphics API**: DirectX 11, or Vulkan through DXVK (restart); if something looks wrong or stutters, try the other one. **Frame rate**: 30, 60, the monitor's rate, or experimental **no limit**. Select **VSync off** and **no limit** in F1 to unlock presentation. Physics, animation and audio timing above 60 fps have not been fully validated; select 60 if they behave incorrectly. Uncapping does not guarantee that the machine can render faster. Disabling VSync can introduce tearing.
 
-## Renderer profiling and regressions
+## Your game files
+
+Only the **Xbox 360 USA** revision is accepted. Extract your own disc image into a new folder and validate it:
+
+```sh
+python tools/extract_iso.py "Battlefield 2 - Modern Combat (USA).iso" --output game_files
+python tools/validate_game.py game_files
+```
+
+```text
+default.xex  a2e791b578ef15420f3737b48999ca4285fdf85c85cb6732aac0e465ed9d5484
+```
+
+Do not upload the ISO, extracted files, generated code or the built executable.
+
+## Building by hand
+
+`Setup.cmd` ([How to play](#how-to-play)) does all of this on Windows. The steps below are for doing it yourself, or on Linux.
+
+### Windows
+
+Requirements: Python 3.10+, Visual Studio 2022 Build Tools (C++ workload, Windows SDK), LLVM/Clang 20 or newer (a complete install that includes the clang resource headers), CMake 3.25+ and Ninja.
+
+```powershell
+python tools/build_local.py --game-files game_files --llvm-dir "C:\Program Files\LLVM"
+python tools/play.py --game-files game_files
+```
+
+`build_local.py` validates your files, downloads the pinned ReXGlue SDK nightly (`0.10.0.24-dev.gbd833a2`, SHA-256 checked) and applies the FPSCR patch in `patches/`, downloads the FFmpeg headers matching the SDK's `libavcodec`, translates your `default.xex` into private C++ under `.local/`, compiles the port, and removes any GPU emulation plugin from the output. `--reuse-generated` skips the translation on later builds.
+
+### Linux
+
+The same kit builds a native Linux x86-64 executable, without Wine: the ReXGlue SDK's Linux package, the port's
+own renderer on Direct3D 11 through DXVK native (a Linux library implementing D3D11 on Vulkan), HLSL shaders
+compiled by vkd3d-shader, window and input through the SDK's SDL3. Requirements: Python 3.10+, Clang 20
+(`clang-20`/`clang++-20` are picked up), CMake 3.25+, Ninja, pkg-config, fontconfig and FreeType development
+files, a Vulkan driver, [DXVK native 3.1.1](https://github.com/doitsujin/dxvk/releases) and vkd3d-shader 1.19 or
+newer.
+
+```sh
+python3 tools/build_local.py --game-files game_files \
+  --dxvk-native-dir /path/to/dxvk-native/usr --vkd3d-dir /path/to/vkd3d-install
+python3 tools/play.py --game-files game_files
+```
+
+The build copies the SDK runtime, DXVK native and vkd3d-shader next to the executable (it finds them there).
+
+### macOS
+
+Experimental and not compiled or run yet: see [MACOS.md](MACOS.md).
+
+## For developers
 
 For automated menu tests using the default keyboard bindings, `BF2_TEST_MENU_TAPS=1` retains short Enter/Space/Backspace/arrow events for 120 ms so guest polling can observe them. It is off by default and does not change gameplay input. Set `BF2_PERF=1` and `PCS_FPS_LOG=1` before launching to log FPS and CPU costs of drawing, constant uploads, vertex synchronization and texture hashing/decoding/uploads. The CPU phase timings are nested and are not GPU timestamps. Avoid periodic image captures during throughput measurements, because GPU readback causes stalls.
 
@@ -130,6 +184,25 @@ Position-export DP4 instructions now accumulate permuted terms in constant-compo
 
 Vertex fetches now zero each word outside the buffer's declared range before unpacking, including mini fetches and partially valid elements. A first-mission foliage draw requested 10,508 vertices from buffers holding 7,008; the excess read adjacent memory and produced giant translucent colored geometry. Captured-input replay preserves all 7,008 valid positions bit-for-bit and makes the 3,500 excess vertices degenerate. The user confirmed the wall is gone in the tested scene, with the foliage shader still enabled. The shader regression script also runs 84 synthetic WARP bounds cases with legacy negative controls. A short, changing-camera profiling interval after shader compilation recorded five FPS samples of 35–52 (median 47), VSync off and no frame limit. This is not a controlled speedup measurement or a stability guarantee.
 
+## Why a native port instead of an emulator
+
+An emulator such as [Xenia](https://xenia.jp) recreates the Xbox 360: it JIT-translates the PowerPC code at run time, emulates the Xenos GPU by processing the console's command buffers and models the audio hardware. That is the right approach for the whole library. This port takes a different route for one game:
+
+- **Ahead-of-time code.** The game's PowerPC code becomes C++ compiled by a modern optimizing compiler before you play.
+- **No GPU emulation in the hot path.** Draw calls go from the game's D3D library straight to Direct3D 11, instead of being turned into command packets and register writes that are emulated again.
+- **Native audio** decoding and mixing on the PC.
+- **PC-side controls in the port itself:** a modern shooter layout (aim on LT) and keyboard/mouse bindings, written as plain C++ hooks you can read and change.
+
+The trade-off: it covers only this game and revision, and it is experimental. An emulator is the more general and better-tested option.
+
+## What is in this repository
+
+- `project/` — the CMake project and the port's own C++ code in `project/src/`: native renderer and Xenos shader translation, XMA audio, PC settings menu and game hooks. The ReXGlue manifest says which game functions are translated; the translated code itself is generated on your PC.
+- `tools/` — `build_local.py` (downloads the pinned ReXGlue SDK, FFmpeg headers and DXVK, translates your executable, compiles), `play.py`, `extract_iso.py` and `validate_game.py`, `setup.ps1` / `setup_tools.py` (behind `Setup.cmd`), `audit_publication.py` (the check that keeps game data out of this repository) and the shared game-file installer in `tools/port-installer`.
+- `patches/` — the small FPSCR patch applied to the SDK headers at build time.
+- `kit.json` (pinned SDK, FFmpeg and DXVK downloads), `installer.json` and `setup.json` (what `Install-Files.cmd` and `Setup.cmd` accept and do), `licenses/` and [NOTICE.md](NOTICE.md).
+- `tests/` — game-free renderer regressions (shader arithmetic, vertex fetch bounds, endian conversion).
+
 ## Credits and licenses
 
 - Port integration, native renderer, audio and controls: [batatinhafcbatatinha-pixel](https://github.com/batatinhafcbatatinha-pixel).
@@ -144,4 +217,4 @@ See [NOTICE.md](NOTICE.md) for the publication boundary and [LICENSE](LICENSE) f
 
 <a id="notice"></a>
 
-**⚠️ THIS PROJECT DOES NOT INCLUDE THE GAME, AN ISO/XEX, EA GAME ASSETS, GENERATED GAME CODE OR A PRECOMPILED GAME EXECUTABLE. YOU MUST PROVIDE YOUR OWN LAWFULLY OBTAINED XBOX 360 USA GAME FILES AND HAVE THE RIGHTS REQUIRED FOR YOUR USE. THIS PROJECT DOES NOT AUTHORIZE COPYRIGHT INFRINGEMENT. ALL GAME RIGHTS BELONG TO THEIR RESPECTIVE OWNERS. ⚠️**
+**THIS PROJECT DOES NOT INCLUDE THE GAME, AN ISO/XEX, EA GAME ASSETS, GENERATED GAME CODE OR A PRECOMPILED GAME EXECUTABLE. YOU MUST PROVIDE YOUR OWN LAWFULLY OBTAINED XBOX 360 USA GAME FILES AND HAVE THE RIGHTS REQUIRED FOR YOUR USE. THIS PROJECT DOES NOT AUTHORIZE COPYRIGHT INFRINGEMENT. ALL GAME RIGHTS BELONG TO THEIR RESPECTIVE OWNERS.**
