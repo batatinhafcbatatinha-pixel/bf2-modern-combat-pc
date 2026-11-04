@@ -18,10 +18,12 @@ static class KitDownload {
     if (Directory.Exists(target) && Directory.EnumerateFileSystemEntries(target).Any() &&
         !File.Exists(Path.Combine(target, "setup.json")))
       throw new IOException(L.T("A pasta escolhida não está vazia: ", "The chosen folder is not empty: ") + target);
-    // The release's source-kit ZIP, or (repositories without one) GitHub's source ZIP of the latest release tag.
+    // The newest release (pre-releases too: releases/latest skips them): its source-kit ZIP, or for
+    // repositories without one, GitHub's source ZIP of that release's tag.
+    string tag = NewestTag(cfg.Repo);
     string url = string.IsNullOrEmpty(cfg.KitAsset)
-        ? $"https://github.com/{cfg.Repo}/archive/refs/tags/{LatestTag(cfg.Repo)}.zip"
-        : $"https://github.com/{cfg.Repo}/releases/latest/download/{cfg.KitAsset}";
+        ? $"https://github.com/{cfg.Repo}/archive/refs/tags/{tag}.zip"
+        : $"https://github.com/{cfg.Repo}/releases/download/{tag}/{cfg.KitAsset}";
     string zip = Path.Combine(Path.GetTempPath(), cfg.Repo.Replace('/', '-') + "-kit.zip");
     log(L.T("Baixando ", "Downloading ") + url);
     using (var web = new WebClient()) {
@@ -53,16 +55,15 @@ static class KitDownload {
     return target;
   }
 
-  // releases/latest redirects to .../releases/tag/<tag>.
-  static string LatestTag(string repo) {
-    var request = (HttpWebRequest)WebRequest.Create($"https://github.com/{repo}/releases/latest");
-    request.AllowAutoRedirect = false;
-    request.UserAgent = "port-launcher";
-    using (var response = (HttpWebResponse)request.GetResponse()) {
-      string location = response.Headers["Location"] ?? "";
-      int at = location.LastIndexOf("/tag/", StringComparison.Ordinal);
-      if (at < 0) throw new IOException("No release found for " + repo);
-      return location.Substring(at + 5);
+  static string NewestTag(string repo) {
+    using (var web = new WebClient()) {
+      web.Headers[HttpRequestHeader.UserAgent] = "port-launcher";
+      web.Headers[HttpRequestHeader.Accept] = "application/vnd.github+json";
+      string json = web.DownloadString($"https://api.github.com/repos/{repo}/releases?per_page=1");
+      var list = new System.Web.Script.Serialization.JavaScriptSerializer().DeserializeObject(json) as object[];
+      if (list == null || list.Length == 0 || !(list[0] is System.Collections.Generic.IDictionary<string, object> release))
+        throw new IOException("No release found for " + repo);
+      return Convert.ToString(release["tag_name"]);
     }
   }
 }

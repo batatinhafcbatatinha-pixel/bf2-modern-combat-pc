@@ -21,7 +21,7 @@ An experimental port of the Xbox 360 version of Battlefield 2: Modern Combat, bu
 
 **Steps**
 
-**Easiest: `Setup.exe`.** Open [Releases](https://github.com/batatinhafcbatatinha-pixel/bf2-modern-combat-pc/releases/latest), download **`Setup.exe`** and run it.
+**Easiest: `Setup.exe`.** Open [Releases](https://github.com/batatinhafcbatatinha-pixel/bf2-modern-combat-pc/releases), download **`Setup.exe`** from the newest one and run it.
 It downloads this kit (source code only), shows what your PC already has and what is missing on its
 *Dependencies* tab, installs what is missing, asks for your `.iso` and builds the game. Afterwards the same
 program (and its desktop shortcut) is your launcher: **Play**, and **PC settings** (the same options as F1 in
