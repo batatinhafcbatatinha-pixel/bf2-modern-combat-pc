@@ -4,7 +4,9 @@
 # -Yes answers every question with yes; -Rebuild redoes every step; -ToolsOnly stops after the tools;
 # -NoShortcut skips the desktop shortcut; -Jobs sets the number of parallel compile jobs;
 # -PrepareOnly (Prepare-Build.cmd) runs only the steps that prepare the build files from your disc, not the compile.
-param([switch]$Yes, [switch]$Rebuild, [switch]$ToolsOnly, [switch]$NoShortcut, [switch]$PrepareOnly, [int]$Jobs = 0)
+# -Only python|buildtools|tools|game installs just that part (the launcher's Dependencies tab).
+param([switch]$Yes, [switch]$Rebuild, [switch]$ToolsOnly, [switch]$NoShortcut, [switch]$PrepareOnly, [int]$Jobs = 0,
+      [ValidateSet('', 'python', 'buildtools', 'tools', 'game')][string]$Only = '')
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 $Root = Split-Path -Parent $PSScriptRoot
@@ -61,7 +63,7 @@ if ($PrepareOnly -and -not @($Setup.steps | Where-Object { $_.prepare }).Count) 
 if (-not [Environment]::Is64BitOperatingSystem) { Fail 'A 64-bit Windows is required.' 'E preciso Windows de 64 bits.' }
 $drive = Get-PSDrive -Name $Root.Substring(0, 1)
 $freeGB = [math]::Floor($drive.Free / 1GB)
-if ($freeGB -lt $Setup.disk_gb) {
+if (-not $Only -and $freeGB -lt $Setup.disk_gb) {
   Say "Only $freeGB GB free on $($drive.Name):. About $($Setup.disk_gb) GB are needed here, plus about 7 GB on C: for the Build Tools." `
       "So ha $freeGB GB livres em $($drive.Name):. Sao necessarios cerca de $($Setup.disk_gb) GB aqui, mais cerca de 7 GB no C: para o Build Tools." 'Yellow'
   if (-not (Ask 'Continue anyway?' 'Continuar mesmo assim?')) { Stop-Transcript | Out-Null; exit 1 }
@@ -88,8 +90,10 @@ if (-not $Python) {
   if (-not $Python) { Fail 'Python was installed but not found. Restart the PC and run Setup again.' 'O Python foi instalado mas nao foi encontrado. Reinicie o PC e rode o Setup de novo.' }
 }
 Say "OK: $Python" "OK: $Python" 'Green'
+if ($Only -eq 'python') { Stop-Transcript | Out-Null; exit 0 }
 
 # 2. Visual Studio Build Tools (C++ compiler libraries and the Windows SDK)
+if ($Only -in @('', 'buildtools')) {
 Step '2/5 Visual Studio Build Tools (C++)' '2/5 Visual Studio Build Tools (C++)'
 $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
 function Find-VC {
@@ -117,8 +121,11 @@ if (-not (Find-VC)) {
 }
 $VsPath = Find-VC
 Say 'OK' 'OK' 'Green'
+}
+if ($Only -eq 'buildtools') { Stop-Transcript | Out-Null; exit 0 }
 
 # 3. Portable tools inside this folder (.local\tools) and the parts a ZIP download leaves out
+if ($Only -in @('', 'tools')) {
 Step '3/5 Build tools and project parts' '3/5 Ferramentas de build e partes do projeto'
 Say "Kept inside this folder; the first download is about $($Setup.download_gb) GB." "Ficam dentro desta pasta; o primeiro download tem cerca de $($Setup.download_gb) GB."
 $toolLines = & $Python (Join-Path $PSScriptRoot 'setup_tools.py')
@@ -126,16 +133,20 @@ if ($LASTEXITCODE -ne 0) { Fail 'Downloading the build tools failed. Check your 
 $Tool = @{}
 foreach ($line in $toolLines) { if ($line -match '^(\w+)=(.*)$') { $Tool[$Matches[1]] = $Matches[2] } }
 # The C++ environment of the Build Tools, then the portable tools in front of it.
+if (-not $Only) {
 $vcvars = Join-Path $VsPath 'VC\Auxiliary\Build\vcvars64.bat'
 foreach ($line in (cmd /c "`"$vcvars`" >nul && set")) { if ($line -match '^([^=]+)=(.*)$') { Set-Item -Path "env:$($Matches[1])" -Value $Matches[2] } }
 $front = @($Tool['PATH'] -split ';' | Where-Object { $_ })
 if ($Tool['JAVA_HOME']) { $env:JAVA_HOME = $Tool['JAVA_HOME']; $front += (Join-Path $Tool['JAVA_HOME'] 'bin') }
 if ($Tool['GHIDRA']) { $env:GHIDRA = $Tool['GHIDRA'] }
 $env:Path = (($front + @(Split-Path -Parent $Python)) -join ';') + ';' + $env:Path
+}
 Say 'OK' 'OK' 'Green'
-if ($ToolsOnly) { Stop-Transcript | Out-Null; exit 0 }
+}
+if ($ToolsOnly -or $Only -eq 'tools') { Stop-Transcript | Out-Null; exit 0 }
 
 # 4. Your game files
+if ($Only -in @('', 'game')) {
 Step "4/5 Your game ($($Setup.disc))" "4/5 Seu jogo ($($Setup.disc))"
 if (-not (Game-Ok)) {
   $installer = Join-Path $Root 'tools\port-installer\installer.py'
@@ -145,6 +156,8 @@ if (-not (Game-Ok)) {
   if (-not (Game-Ok)) { Fail "game_files does not hold the supported version: $($Setup.disc)." "game_files nao contem a versao suportada: $($Setup.disc)." }
 }
 Say 'OK' 'OK' 'Green'
+}
+if ($Only -eq 'game') { Stop-Transcript | Out-Null; exit 0 }
 
 # 5. Build
 Step '5/5 Building your PC version' '5/5 Montando sua versao para PC'

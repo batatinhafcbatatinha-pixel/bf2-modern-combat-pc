@@ -51,3 +51,9 @@ game-install-report.json
 !/tools/setup.ps1
 !/tools/setup_tools.py
 setup-log.txt
+
+# Launcher (installer, Play, Dependencies, PC settings): its source and this game's configuration
+!/launcher.json
+!/tools/launcher/
+/tools/launcher/bin/
+/tools/launcher/obj/

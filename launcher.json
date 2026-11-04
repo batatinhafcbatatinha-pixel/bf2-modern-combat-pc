@@ -1,0 +1,502 @@
+{
+ "game": "Battlefield 2: Modern Combat",
+ "disc": "Xbox 360, USA",
+ "disk_gb": 16,
+ "minutes": "20-60",
+ "repo": "batatinhafcbatatinha-pixel/bf2-modern-combat-pc",
+ "kit_asset": "bf2-modern-combat-pc-source-kit.zip",
+ "play": "Play-BF2MC.cmd",
+ "setup": "tools/setup.ps1",
+ "exe": ".local/build/bf2mc.exe",
+ "ini": ".local/build/bf2mc-pc.ini",
+ "section": "opcoes",
+ "vulkan_dir": ".local/build/vulkan",
+ "deps": {
+  "buildtools_gb": 7,
+  "python_gb": 0.1,
+  "tools": [
+   {
+    "id": "llvm",
+    "name": "LLVM / Clang 22.1.2",
+    "check": ".local/tools/llvm-22.1.2/bin/clang++.exe",
+    "gb": 3.0
+   },
+   {
+    "id": "cmake",
+    "name": "CMake 3.31.12",
+    "check": ".local/tools/cmake-3.31.12/bin/cmake.exe",
+    "gb": 0.1
+   },
+   {
+    "id": "ninja",
+    "name": "Ninja 1.13.2",
+    "check": ".local/tools/ninja-1.13.2/ninja.exe",
+    "gb": 0.01
+   }
+  ],
+  "game_files": {
+   "game_files/default.xex": "a2e791b578ef15420f3737b48999ca4285fdf85c85cb6732aac0e465ed9d5484"
+  }
+ },
+ "groups": [
+  {
+   "pt": "Vídeo",
+   "en": "Video",
+   "items": [
+    {
+     "key": "modo_tela",
+     "pt": "Modo de tela",
+     "en": "Display mode",
+     "default": 0,
+     "help_pt": "Janela, tela cheia sem bordas (troca rápida com Alt+Tab) ou tela cheia exclusiva.",
+     "help_en": "Windowed, borderless fullscreen (quick Alt+Tab) or exclusive fullscreen.",
+     "choices": [
+      {
+       "v": 0,
+       "pt": "Janela",
+       "en": "Windowed"
+      },
+      {
+       "v": 1,
+       "pt": "Tela cheia (sem bordas)",
+       "en": "Borderless fullscreen"
+      },
+      {
+       "v": 2,
+       "pt": "Tela cheia exclusiva",
+       "en": "Exclusive fullscreen"
+      }
+     ]
+    },
+    {
+     "key": "monitor",
+     "pt": "Monitor",
+     "en": "Monitor",
+     "default": 0,
+     "help_pt": "Em qual monitor o jogo aparece.",
+     "help_en": "Monitor used to display the game.",
+     "source": "monitors"
+    },
+    {
+     "key": "taxa_hz",
+     "pt": "Taxa de atualização",
+     "en": "Refresh rate",
+     "default": 0,
+     "help_pt": "Frequência do monitor na tela cheia exclusiva.",
+     "help_en": "Monitor refresh rate in exclusive fullscreen.",
+     "source": "refresh"
+    },
+    {
+     "key": "vsync",
+     "pt": "Sincronia vertical (VSync)",
+     "en": "Vertical sync (VSync)",
+     "default": 1,
+     "help_pt": "Espera o monitor para mostrar cada quadro: sem cortes na imagem, um pouco mais de atraso.",
+     "help_en": "Synchronizes frames with the monitor to prevent tearing, with slightly more latency.",
+     "choices": [
+      {
+       "v": 1,
+       "pt": "Ligada",
+       "en": "On"
+      },
+      {
+       "v": 0,
+       "pt": "Desligada",
+       "en": "Off"
+      }
+     ]
+    },
+    {
+     "key": "limite_fps",
+     "pt": "Limite de quadros",
+     "en": "Frame limit",
+     "default": 60,
+     "help_pt": "60 como no console, a taxa do monitor (mais fluido em telas de 120/144 Hz) ou sem limite. 30 economiza energia.",
+     "help_en": "60 as on the console, the monitor's rate (smoother on 120/144 Hz screens) or no limit. 30 saves power.",
+     "choices": [
+      {
+       "v": 60,
+       "pt": "60 fps (original)",
+       "en": "60 fps (original)"
+      },
+      {
+       "v": -1,
+       "pt": "A do monitor",
+       "en": "Monitor rate"
+      },
+      {
+       "v": 0,
+       "pt": "Sem limite",
+       "en": "Unlimited"
+      },
+      {
+       "v": 30,
+       "pt": "30 fps",
+       "en": "30 fps"
+      }
+     ]
+    },
+    {
+     "key": "resolucao",
+     "pt": "Resolução interna",
+     "en": "Internal resolution",
+     "default": 0,
+     "help_pt": "Resolução em que o jogo é desenhado: maior = imagem mais nítida, mais trabalho para a placa.",
+     "help_en": "Higher rendering resolutions give a sharper image and increase GPU load.",
+     "choices": [
+      {
+       "v": 7,
+       "pt": "360p",
+       "en": "360p"
+      },
+      {
+       "v": 6,
+       "pt": "540p",
+       "en": "540p"
+      },
+      {
+       "v": 0,
+       "pt": "720p (original)",
+       "en": "720p (original)"
+      },
+      {
+       "v": 1,
+       "pt": "1080p (Full HD)",
+       "en": "1080p (Full HD)"
+      },
+      {
+       "v": 2,
+       "pt": "1440p (QHD)",
+       "en": "1440p (QHD)"
+      },
+      {
+       "v": 3,
+       "pt": "2160p (4K)",
+       "en": "2160p (4K)"
+      },
+      {
+       "v": 5,
+       "pt": "4320p (8K)",
+       "en": "4320p (8K)"
+      },
+      {
+       "v": 4,
+       "pt": "Resolução do monitor",
+       "en": "Monitor resolution"
+      }
+     ]
+    },
+    {
+     "key": "ampliacao",
+     "pt": "Ampliação da imagem",
+     "en": "Upscaling",
+     "default": 0,
+     "help_pt": "Como a imagem é ampliada quando a resolução interna é menor que a da tela. AMD FSR 1.0 reconstrói as bordas e aumenta a nitidez.",
+     "help_en": "How the picture is enlarged when the internal resolution is below the screen's. AMD FSR 1.0 rebuilds edges and sharpens.",
+     "choices": [
+      {
+       "v": 0,
+       "pt": "Bilinear",
+       "en": "Bilinear"
+      },
+      {
+       "v": 1,
+       "pt": "AMD FSR 1.0",
+       "en": "AMD FSR 1.0"
+      }
+     ]
+    },
+    {
+     "key": "proporcao",
+     "pt": "Proporção da imagem",
+     "en": "Aspect ratio",
+     "default": 0,
+     "help_pt": "O jogo é 16:9. Em telas de outro formato, com barras ou esticado.",
+     "help_en": "The game is 16:9. On other screen shapes: with bars or stretched.",
+     "choices": [
+      {
+       "v": 0,
+       "pt": "16:9 (original, com barras)",
+       "en": "16:9 (original, with bars)"
+      },
+      {
+       "v": 1,
+       "pt": "Esticar até a tela",
+       "en": "Stretch to the screen"
+      }
+     ]
+    },
+    {
+     "key": "fxaa",
+     "pt": "Antisserrilhamento",
+     "en": "Anti-aliasing",
+     "default": 0,
+     "help_pt": "FXAA suaviza as bordas serrilhadas com custo quase nulo.",
+     "help_en": "FXAA smooths jagged edges with minimal performance cost.",
+     "choices": [
+      {
+       "v": 0,
+       "pt": "Desligado",
+       "en": "Off"
+      },
+      {
+       "v": 1,
+       "pt": "FXAA",
+       "en": "FXAA"
+      }
+     ]
+    },
+    {
+     "key": "msaa",
+     "pt": "Multiamostragem (MSAA)",
+     "en": "Multisampling (MSAA)",
+     "default": 0,
+     "help_pt": "Suaviza as bordas da cena 3D desenhando-a com várias amostras por pixel. Mais nítido que o FXAA, mais trabalho para a placa.",
+     "help_en": "Smooths the edges of the 3D scene by drawing it with several samples per pixel. Sharper than FXAA, more work for the graphics card.",
+     "choices": [
+      {
+       "v": 0,
+       "pt": "Desligada",
+       "en": "Off"
+      },
+      {
+       "v": 2,
+       "pt": "2x",
+       "en": "2x"
+      },
+      {
+       "v": 4,
+       "pt": "4x",
+       "en": "4x"
+      },
+      {
+       "v": 8,
+       "pt": "8x",
+       "en": "8x"
+      }
+     ]
+    },
+    {
+     "key": "anisotropico",
+     "pt": "Filtro anisotrópico",
+     "en": "Anisotropic filtering",
+     "default": 0,
+     "help_pt": "Deixa nítidas as texturas vistas em ângulo, como o chão.",
+     "help_en": "Sharpens textures viewed at an angle, such as the ground.",
+     "choices": [
+      {
+       "v": 0,
+       "pt": "O do jogo",
+       "en": "Game default"
+      },
+      {
+       "v": 2,
+       "pt": "2x",
+       "en": "2x"
+      },
+      {
+       "v": 4,
+       "pt": "4x",
+       "en": "4x"
+      },
+      {
+       "v": 8,
+       "pt": "8x",
+       "en": "8x"
+      },
+      {
+       "v": 16,
+       "pt": "16x",
+       "en": "16x"
+      }
+     ]
+    },
+    {
+     "key": "bloom",
+     "pt": "Bloom",
+     "en": "Bloom",
+     "default": 1,
+     "help_pt": "Brilho em volta das partes claras da imagem.",
+     "help_en": "Glow around the bright parts of the image.",
+     "choices": [
+      {
+       "v": 1,
+       "pt": "Ligado",
+       "en": "On"
+      },
+      {
+       "v": 0,
+       "pt": "Desligado",
+       "en": "Off"
+      }
+     ]
+    },
+    {
+     "key": "api_grafica",
+     "pt": "API gráfica",
+     "en": "Graphics API",
+     "default": 0,
+     "help_pt": "DirectX 11 ou Vulkan (pelo DXVK). Se algo aparecer errado ou travar, experimente a outra.",
+     "help_en": "DirectX 11 or Vulkan (through DXVK). If something looks wrong or stutters, try the other one.",
+     "choices": [
+      {
+       "v": 0,
+       "pt": "DirectX 11",
+       "en": "DirectX 11"
+      },
+      {
+       "v": 1,
+       "pt": "Vulkan (DXVK)",
+       "en": "Vulkan (DXVK)"
+      }
+     ],
+     "restart": true,
+     "requires": "vulkan"
+    },
+    {
+     "key": "gpu",
+     "pt": "Placa de vídeo",
+     "en": "Graphics card",
+     "default": -1,
+     "help_pt": "Placa de vídeo usada para desenhar o jogo.",
+     "help_en": "Graphics card used to render the game.",
+     "source": "gpus",
+     "restart": true
+    }
+   ]
+  },
+  {
+   "pt": "Sistema",
+   "en": "System",
+   "items": [
+    {
+     "key": "mostrar_fps",
+     "pt": "Mostrar FPS",
+     "en": "Show FPS",
+     "default": 0,
+     "help_pt": "Mostra os quadros por segundo no canto da tela.",
+     "help_en": "Shows frames per second in the corner of the screen.",
+     "choices": [
+      {
+       "v": 0,
+       "pt": "Não",
+       "en": "No"
+      },
+      {
+       "v": 1,
+       "pt": "Sim",
+       "en": "Yes"
+      }
+     ]
+    },
+    {
+     "key": "vibracao",
+     "pt": "Vibração do controle",
+     "en": "Controller vibration",
+     "default": 1,
+     "help_pt": "Liga ou desliga a vibração do controle.",
+     "help_en": "Turns the controller's vibration on or off.",
+     "choices": [
+      {
+       "v": 1,
+       "pt": "Ligada",
+       "en": "On"
+      },
+      {
+       "v": 0,
+       "pt": "Desligada",
+       "en": "Off"
+      }
+     ]
+    },
+    {
+     "key": "botao_menu",
+     "pt": "Botão das configurações nos menus",
+     "en": "Settings button on the menus",
+     "default": 1,
+     "help_pt": "Mostra o botão das configurações do PC sobre os menus do jogo.",
+     "help_en": "Shows the PC settings button over the game's menus.",
+     "choices": [
+      {
+       "v": 1,
+       "pt": "Mostrar",
+       "en": "Show"
+      },
+      {
+       "v": 0,
+       "pt": "Esconder",
+       "en": "Hide"
+      }
+     ]
+    },
+    {
+     "key": "idioma_menu",
+     "pt": "Idioma do menu F1",
+     "en": "F1 menu language",
+     "default": -1,
+     "help_pt": "Idioma do menu de configurações dentro do jogo. Automático segue o idioma do jogo.",
+     "help_en": "Language of the in-game settings menu. Automatic follows the game's language.",
+     "choices": [
+      {
+       "v": -1,
+       "pt": "Automático",
+       "en": "Automatic"
+      },
+      {
+       "v": 0,
+       "pt": "Português",
+       "en": "Português"
+      },
+      {
+       "v": 1,
+       "pt": "English",
+       "en": "English"
+      },
+      {
+       "v": 2,
+       "pt": "Español",
+       "en": "Español"
+      },
+      {
+       "v": 3,
+       "pt": "Français",
+       "en": "Français"
+      },
+      {
+       "v": 4,
+       "pt": "Deutsch",
+       "en": "Deutsch"
+      },
+      {
+       "v": 5,
+       "pt": "Italiano",
+       "en": "Italiano"
+      },
+      {
+       "v": 6,
+       "pt": "Nederlands",
+       "en": "Nederlands"
+      },
+      {
+       "v": 7,
+       "pt": "Русский",
+       "en": "Русский"
+      }
+     ]
+    },
+    {
+     "key": "volume",
+     "pt": "Volume",
+     "en": "Volume",
+     "default": 100,
+     "help_pt": "Volume geral do jogo.",
+     "help_en": "Overall game volume.",
+     "min": 0,
+     "max": 100,
+     "step": 5
+    }
+   ]
+  }
+ ],
+ "launcher_name": "Setup"
+}

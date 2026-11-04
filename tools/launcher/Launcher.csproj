@@ -1,0 +1,30 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- Port launcher: installs the port (tools/setup.ps1), starts the game and edits its PC settings.
+       .NET Framework 4.8 ships with Windows 10 and 11, so the player needs nothing else.
+       Build: dotnet build -c Release -p:GameConfig=path\to\launcher.json -p:AssemblyName=Name -->
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net48</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <UseWindowsForms>true</UseWindowsForms>
+    <AssemblyName Condition="'$(AssemblyName)' == ''">Launcher</AssemblyName>
+    <RootNamespace>PortLauncher</RootNamespace>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon Condition="Exists('$(GameIcon)')">$(GameIcon)</ApplicationIcon>
+    <Deterministic>true</Deterministic>
+    <DebugType>none</DebugType>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <Product>Port launcher</Product>
+    <Description>Installs, configures and starts a PC port built from your own game disc.</Description>
+    <Version>1.0.0</Version>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies" Version="1.0.3" PrivateAssets="all" />
+    <Reference Include="Microsoft.CSharp" />
+    <Reference Include="System.IO.Compression" />
+    <Reference Include="System.IO.Compression.FileSystem" />
+    <Reference Include="System.Net.Http" />
+    <Reference Include="System.Web.Extensions" />
+    <EmbeddedResource Include="$(GameConfig)" LogicalName="launcher.json" Condition="'$(GameConfig)' != ''" />
+  </ItemGroup>
+</Project>
